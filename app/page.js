@@ -3,7 +3,7 @@
 import Arrow from "@/components/icons/Arrow";
 import GithubIcon from "@/components/icons/Github";
 import LinkedInIcon from "@/components/icons/LinkedIn";
-import MailIcon from "@/components/icons/Mail";
+
 import TwitterIcon from "@/components/icons/Twitter";
 import ThemeSwitch from "@/components/ThemeSwitch";
 import { ThemeProvider } from "next-themes";
@@ -13,11 +13,13 @@ import Link from "next/link";
 export default function Home() {
   return (
     <ThemeProvider attribute='class' defaultTheme='dark'>
-      <main className='min-h-screen max-w-4xl mx-auto flex flex-col font-montserrat p-6 sm:p-24'>
-        <ThemeSwitch />
+      <main className='min-h-screen max-w-4xl mx-auto flex flex-col  font-montserrat p-6 sm:p-24'>
+        <div className='flex justify-end mb-12'>
+          <ThemeSwitch />
+        </div>
         <div className='text-black dark:text-primary'>
           <h1 className='text-4xl font-bold'>Taha Mutlu Kanar</h1>
-          <p className='text-xl'>Developer</p>
+          <p className='text-xl'>Software Developer</p>
         </div>
 
         <div className='flex flex-col sm:flex-row items-start sm:items-center my-5'>
@@ -34,13 +36,18 @@ export default function Home() {
             currently working at Akinon.
           </p>
         </div>
+        <hr className='h-1 block sm:hidden mb-3' />
         <p>
           As a highly motivated and energetic individual, I am always open to
           new opportunities for development, particularly those that require
           strong teamwork. I am solution-oriented and driven to find effective
           solutions to complex problems. My strong work ethic and commitment to
           hard work enable me to tackle challenges with enthusiasm and
-          perseverance.
+          perseverance. You can always reach me via
+          <Link className='mx-1 font-medium' href='mailto:tahakanar@gmail.com'>
+            my email
+          </Link>
+          address.
         </p>
         <div className='flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-4 mt-4'>
           <Link
@@ -52,7 +59,7 @@ export default function Home() {
               <TwitterIcon className='text-black dark:text-primary w-8' />
               <span className='font-medium'>Twitter</span>
             </div>
-            <Arrow className='text-black dark:text-primary w-4' />
+            <Arrow className='text-black dark:text-primary' />
           </Link>
           <Link
             className='border border-1 flex-1 p-3 rounded-md flex justify-between items-center border-black dark:border-gray-600'
@@ -63,7 +70,7 @@ export default function Home() {
               <GithubIcon className='text-black dark:text-primary w-8' />
               <span className='font-medium'>Github</span>
             </div>
-            <Arrow className='text-black dark:text-primary w-4' />
+            <Arrow className='text-black dark:text-primary' />
           </Link>
           <Link
             className='border border-1 flex-1 p-3 rounded-md flex justify-between items-center border-black dark:border-gray-600'
@@ -74,7 +81,7 @@ export default function Home() {
               <LinkedInIcon className='text-black dark:text-primary w-8' />
               <span className='font-medium'>LinkedIn</span>
             </div>
-            <Arrow className='text-black dark:text-primary w-4' />
+            <Arrow className='text-black dark:text-primary' />
           </Link>
         </div>
       </main>
