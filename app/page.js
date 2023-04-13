@@ -32,8 +32,8 @@ export default function Home() {
             alt='Profil Fotoğrafı'
           />
           <p className='mt-3 sm:mt-0 sm:ml-3'>
-            Hey, I'm Taha, a software developer residing in Istanbul. I'm
-            currently working at Akinon.
+            Hey, I&apos;m Taha, a software developer residing in Istanbul.
+            I&apos;m currently working at Akinon.
           </p>
         </div>
         <hr className='h-1 block sm:hidden mb-3' />
