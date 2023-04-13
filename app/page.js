@@ -3,6 +3,7 @@
 import Arrow from "@/components/icons/Arrow";
 import GithubIcon from "@/components/icons/Github";
 import LinkedInIcon from "@/components/icons/LinkedIn";
+import Mail from "@/components/icons/Mail";
 
 import TwitterIcon from "@/components/icons/Twitter";
 import ThemeSwitch from "@/components/ThemeSwitch";
@@ -13,7 +14,7 @@ import Link from "next/link";
 export default function Home() {
   return (
     <ThemeProvider attribute='class' defaultTheme='dark'>
-      <main className='min-h-screen max-w-4xl mx-auto flex flex-col  font-montserrat p-6 sm:p-24'>
+      <main className='min-h-screen max-w-5xl mx-auto flex flex-col  font-montserrat p-6 sm:p-24'>
         <div className='flex justify-end mb-12'>
           <ThemeSwitch />
         </div>
@@ -49,7 +50,18 @@ export default function Home() {
           </Link>
           address.
         </p>
-        <div className='flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-4 mt-4'>
+        <div className='flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-2 mt-4'>
+          <Link
+            className='border border-1 flex-1 p-3 rounded-md flex justify-between items-center border-black dark:border-gray-600'
+            href='mailto:tahakanar@gmail.com'
+            target='_blank'
+          >
+            <div className='flex items-center space-x-3'>
+              <Mail className='text-black dark:text-primary w-8' />
+              <span className='font-medium'>Email</span>
+            </div>
+            <Arrow className='text-black dark:text-primary' />
+          </Link>
           <Link
             className='border border-1 flex-1 p-3 rounded-md flex justify-between items-center border-black dark:border-gray-600'
             href='https://twitter.com/TahaKanar'
@@ -77,7 +89,7 @@ export default function Home() {
             href='https://www.linkedin.com/in/tahamutlukanar/'
             target='_blank'
           >
-            <div className='flex items-center space-x-3'>
+            <div className='flex items-center space-x-2'>
               <LinkedInIcon className='text-black dark:text-primary w-8' />
               <span className='font-medium'>LinkedIn</span>
             </div>
