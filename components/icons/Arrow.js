@@ -3,7 +3,7 @@ import React from "react";
 const Arrow = ({ className }) => {
   return (
     <svg
-      className={`${className} mr-2 w-4`}
+      className={`${className} mr-2 w-3`}
       role='img'
       fill='currentColor'
       viewBox='0 0 12 12'
