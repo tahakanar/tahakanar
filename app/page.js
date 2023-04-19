@@ -8,9 +8,9 @@ import Mail from "@/components/icons/Mail";
 import TwitterIcon from "@/components/icons/Twitter";
 import ThemeSwitch from "@/components/ThemeSwitch";
 import { ThemeProvider } from "next-themes";
-import Image from "next/image";
+import NextImage from "next/image";
 import Link from "next/link";
-import image from "../public/profile.png";
+// import image from "../public/profile.png";
 
 export default function Home() {
   return (
@@ -25,9 +25,11 @@ export default function Home() {
         </div>
 
         <div className='flex flex-col sm:flex-row items-start sm:items-center my-5'>
-          <Image
-            src={image}
-            className='w-24 h-24 rounded-full bg-black saturate-0 dark:saturate-100 transition-all duration-700 hover:saturate-100'
+          <NextImage
+            src='/profile.png'
+            width={100}
+            height={100}
+            className='rounded-full bg-black saturate-0 dark:saturate-100 transition-all duration-700 hover:saturate-100'
             priority
             alt='Profil Fotoğrafı'
           />
