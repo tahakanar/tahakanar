@@ -26,9 +26,7 @@ export default function Home() {
         <div className='flex flex-col sm:flex-row items-start sm:items-center my-5'>
           <Image
             src='/profile.png'
-            width={100}
-            height={100}
-            className='rounded-full bg-black saturate-0 dark:saturate-100 transition-all duration-700 hover:saturate-100'
+            className='w-24 h-24 rounded-full bg-black saturate-0 dark:saturate-100 transition-all duration-700 hover:saturate-100'
             priority
             alt='Profil Fotoğrafı'
           />
