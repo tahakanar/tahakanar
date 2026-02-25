@@ -8,6 +8,7 @@ import ThemeSwitch from '@/components/ThemeSwitch';
 import Image from 'next/image';
 import Link from 'next/link';
 
+import { unstable_ViewTransition as ViewTransition } from 'react';
 import { getAllPosts } from '@/lib/mdx';
 
 export default async function Home() {
@@ -135,9 +136,11 @@ export default async function Home() {
 								<span>{post.meta.readingTime} min read</span>
 							</div>
 
-							<h3 className='text-lg sm:text-xl font-bold text-black dark:text-primary mb-2 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors'>
-								{post.meta.title}
-							</h3>
+							<ViewTransition name={`post-title-${post.slug}`}>
+								<h3 className='text-lg sm:text-xl font-bold text-black dark:text-primary mb-2 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors'>
+									{post.meta.title}
+								</h3>
+							</ViewTransition>
 
 							<p className='text-sm text-gray-600 dark:text-gray-400 leading-relaxed mb-3 line-clamp-2'>
 								{post.meta.description}

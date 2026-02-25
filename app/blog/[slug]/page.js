@@ -1,3 +1,4 @@
+import { unstable_ViewTransition as ViewTransition } from 'react';
 import { getPostBySlug, getPostSlugs } from '@/lib/mdx';
 import { MDXRemote } from 'next-mdx-remote/rsc';
 import rehypePrettyCode from 'rehype-pretty-code';
@@ -40,7 +41,7 @@ export default async function BlogPost({ params }) {
 					href='/'
 					className='flex items-center text-gray-600 hover:text-black dark:text-gray-400 dark:hover:text-primary transition-colors group'
 				>
-					<Arrow className='w-5 h-5 mr-2 rotate-180 transition-transform group-hover:-translate-x-1' />
+					<Arrow className='w-4 h-4 mr-2 rotate-180 transition-transform' />
 					<span className='font-medium'>Back to Home</span>
 				</Link>
 				<ThemeSwitch />
@@ -60,9 +61,11 @@ export default async function BlogPost({ params }) {
 						<span>{meta.readingTime} min read</span>
 					</div>
 
-					<h1 className='text-3xl sm:text-4xl font-bold text-black dark:text-primary mb-6 leading-tight'>
-						{meta.title}
-					</h1>
+					<ViewTransition name={`post-title-${slug}`}>
+						<h1 className='text-3xl sm:text-4xl font-bold text-black dark:text-primary mb-6 leading-tight'>
+							{meta.title}
+						</h1>
+					</ViewTransition>
 
 					<div className='flex items-center space-x-4 pb-6 border-b border-gray-200 dark:border-gray-800'>
 						<Image
