@@ -17,5 +17,6 @@ module.exports = {
 				montserrat: ['"Montserrat"', ...theme.fontFamily.sans]
 			}
 		}
-	}
+	},
+	plugins: [require('@tailwindcss/typography')]
 };

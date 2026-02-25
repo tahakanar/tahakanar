@@ -1,4 +1,5 @@
 import './globals.css';
+import Providers from '@/components/Providers';
 
 export const metadata = {
 	title: {
@@ -43,7 +44,7 @@ export default function RootLayout({ children }) {
 				className=' bg-primary antialiased dark:bg-black'
 				suppressHydrationWarning
 			>
-				{children}
+				<Providers>{children}</Providers>
 			</body>
 		</html>
 	);
