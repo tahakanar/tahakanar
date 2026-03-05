@@ -1,0 +1,133 @@
+---
+title: 'Deploying a Next.js Application to Production with Hetzner VPS and Dokploy'
+date: '2025-02-26'
+description: 'How I moved tahakanar.com off Vercel and onto a Hetzner VPS using Dokploy — the setup, the problems I ran into, and how I fixed them.'
+---
+
+Deploying to Vercel takes about two minutes. You push, it builds, it's live. For a long time that was good enough for me.
+
+But at some point I wanted to actually own the infrastructure. Not just the code. So I moved this site to a Hetzner VPS and set everything up myself — Docker, reverse proxy, SSL, automatic deployments. This post is a writeup of how I did it, including the parts that didn't work on the first try.
+
+## The stack
+
+Before getting into the steps, here's what the final setup looks like:
+
+- Hetzner VPS (Ubuntu 22.04, CPX21 — 2 vCPU, 4GB RAM)
+- Docker as the container runtime
+- Dokploy for orchestration, reverse proxy, and SSL
+- Nixpacks to build the Docker image from the repo
+- Next.js running on Node 22
+- Let's Encrypt for certificates
+- GitHub push → auto deploy
+
+## Provisioning the server
+
+I went with Hetzner mainly because of the price. A CPX21 costs a few euros a month and it's more than enough for a personal site.
+
+From the Hetzner Cloud panel I picked Ubuntu 22.04, added my SSH key, and set up a basic firewall — ports 22, 80, and 443 open, everything else closed.
+
+Once it was up I SSH'd in and ran the usual:
+
+```bash
+ssh root@SERVER_IP
+apt update && apt upgrade -y
+```
+
+## Installing Dokploy
+
+Dokploy is what handles everything after the server is provisioned — container management, reverse proxy config, SSL, and git-based deployments. It runs on top of Docker and has a web UI.
+
+Installation is a single command:
+
+```bash
+curl -sSL https://dokploy.com/install.sh | bash
+```
+
+After that, the panel is at `http://SERVER_IP:3000`. You create an admin account on first visit and you're in.
+
+## DNS
+
+I pointed the domain to the server with two A records — one for the root (`@`) and one for `www`, both pointing to the server IP.
+
+To check that propagation went through:
+
+```bash
+dig tahakanar.com
+```
+
+If you see the correct IP, you're good to move on.
+
+## Connecting GitHub and setting up the project
+
+Inside Dokploy I connected my GitHub account, created a new project, selected the repo, set the branch to `master`, and turned on "On Push" deploys.
+
+For the build type I went with Nixpacks. It automatically detects that it's a Next.js project and generates a Docker image without any extra config. I didn't need to write a Dockerfile.
+
+## The Node version problem
+
+The first deploy failed with this error:
+
+> This is happening because the package's manifest has an engines.node field specified.
+
+My `package.json` had:
+
+```json
+"engines": {
+  "node": ">=22"
+}
+```
+
+But Nixpacks was picking a different Node version during the build. The fix was simple — I added a `.nvmrc` file to the project root:
+
+```
+v22.13.0
+```
+
+You can also set it as an environment variable in Dokploy if you prefer:
+
+```
+NODE_VERSION=22.13.0
+```
+
+After that the build went through fine.
+
+## Domain and SSL
+
+Under the project's Domains tab I added `tahakanar.com` and `www.tahakanar.com`, set the container port to 3000, enabled HTTPS, and selected Let's Encrypt as the certificate provider.
+
+Dokploy uses Traefik under the hood, so it handles the reverse proxy and certificate renewal automatically. Nothing to configure manually there.
+
+## WWW redirect
+
+One thing Dokploy doesn't handle is redirecting `www` to the root domain. I didn't want duplicate content issues, so I added the redirect directly in `next.config.js`:
+
+```javascript
+async redirects() {
+  return [
+    {
+      source: "/:path*",
+      has: [{ type: "host", value: "www.tahakanar.com" }],
+      destination: "https://tahakanar.com/:path*",
+      permanent: true,
+    },
+  ];
+}
+```
+
+This sends a 301 from `www.tahakanar.com` to `tahakanar.com` for every path.
+
+## Locking down port 3000
+
+Since Traefik handles all incoming traffic on 80 and 443, there's no reason for port 3000 to be publicly accessible. I blocked it with:
+
+```bash
+ufw deny 3000
+```
+
+## How deploys work now
+
+The flow is: push to GitHub → webhook triggers Dokploy → Nixpacks builds a new Docker image → container restarts → Traefik picks up the new routing. The whole thing takes about a minute and the logs are visible in the Dokploy panel.
+
+## Was it worth it?
+
+Honestly, yes. The setup took a few hours and there were a couple of things to figure out along the way, but now I have full control over the environment, a fixed monthly cost, and I can host multiple projects on the same server. That last part is something I'm planning to explore next.
