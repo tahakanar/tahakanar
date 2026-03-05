@@ -21,7 +21,8 @@ export async function generateMetadata({ params }) {
 
 	return {
 		title: meta.title,
-		description: meta.description
+		description: meta.description,
+		keywords: meta.keywords
 	};
 }
 
