@@ -1,5 +1,6 @@
 import './globals.css';
 import Providers from '@/components/Providers';
+import { GoogleAnalytics } from '@next/third-parties/google';
 
 export const metadata = {
 	title: {
@@ -40,6 +41,7 @@ export const metadata = {
 export default function RootLayout({ children }) {
 	return (
 		<html lang='en' suppressHydrationWarning>
+			<GoogleAnalytics gaId='G-T7PQG8286L' />
 			<body
 				className=' bg-primary antialiased dark:bg-black'
 				suppressHydrationWarning
