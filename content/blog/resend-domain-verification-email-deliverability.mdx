@@ -1,0 +1,153 @@
+---
+title: 'Resend + Custom Domain: How to Stop Emails from Landing in Spam'
+date: '2026-03-05'
+description: 'Set up Resend with a custom domain the right way: SPF/DKIM/DMARC explained, common mistakes, and a clean Next.js route to send emails.'
+keywords:
+  [
+    'Resend domain verification',
+    'SPF DKIM DMARC setup',
+    'email deliverability checklist',
+    'Next.js send email API route',
+    'verified from address',
+    'DNS records for email',
+    'transactional email best practices',
+    'avoid emails going to spam',
+    'Resend Next.js example',
+    'domain authenticated email sending'
+  ]
+---
+
+You finally got the green "Verified" badges on your email provider's dashboard. You test it out, send an email, and... it goes straight to the spam folder.
+
+I've been there. Recently, while setting up emails for a new project using Resend, I spent way too much time debugging deliverability issues. My Next.js code was perfectly fine, but my DNS records were a mess.
+
+Email deliverability is rarely a code problem; it's almost always a DNS problem. In this post, I'll skip the heavy theory and give you a practical breakdown of what SPF, DKIM, and DMARC actually do, the stupid mistakes I made (so you don't have to), and a clean Next.js API route that just works.
+
+## What domain verification actually does
+
+When you use a provider like Resend, you're essentially asking: "Send emails on behalf of my domain." Receiving mail servers — Gmail, Outlook, iCloud — don't take that at face value.
+
+The trust system for email lives entirely in DNS. When you verify a domain, you're adding records that let receivers check: "Did this sender have permission? Was this message tampered with?" If those checks pass, your email is much more likely to land in the inbox.
+
+The core idea is simple: your code can be perfect and your Resend setup correct, but if the DNS authentication is missing or misconfigured, deliverability will be weak regardless.
+
+## SPF, DKIM, and DMARC — a simple mental model
+
+These three come up constantly. Here's how I think about them:
+
+**SPF** answers: "Which servers are allowed to send mail for my domain?"
+
+It's a DNS TXT record that lists approved senders. If a random server tries to send as `@yourdomain.com` and isn't listed, receivers can reject it.
+
+**DKIM** answers: "Was this specific message signed by the domain owner?"
+
+Your provider signs outgoing messages with a private key. Your DNS holds the matching public key. Receivers verify the signature on arrival. If the message was altered in transit, the signature won't match. In practice, DKIM is one of the strongest deliverability signals you can have.
+
+**DMARC** answers: "If SPF or DKIM fails, what should the receiver do?"
+
+It also enables abuse reporting — you can get reports about who's trying to send mail as your domain. DMARC isn't strictly required to start sending, but it's worth adding once your setup is stable.
+
+A reasonable order: get DKIM and SPF right first, then layer DMARC on top.
+
+## Choosing the right "From" address
+
+If you verified `yourdomain.com`, you can send from any address at that domain — `send@yourdomain.com`, `hello@yourdomain.com`, `noreply@yourdomain.com`. What matters is that the domain in the From address matches the verified domain exactly.
+
+A common pattern that works well:
+
+```
+From: Your App <send@yourdomain.com>
+Reply-To: support@yourdomain.com
+```
+
+The `Reply-To` is optional but useful if you want replies going to a monitored inbox rather than the sending address.
+
+## Common mistakes
+
+These are the ones I've run into or seen others hit:
+
+**DNS records added to the wrong place.** If your nameservers point to Cloudflare but you added records in your registrar's panel, they won't take effect. Always check where DNS is actually authoritative before adding records.
+
+**The From domain doesn't match the verified domain.** If you verified `yourdomain.com` but send from `send@yourdomain.co.uk`, that's a different domain — not verified. Keep them exactly the same.
+
+**DKIM exists but SPF doesn't (or vice versa).** Having both is better. Some receivers are stricter than others. Don't assume one is enough.
+
+**Setting DMARC to `p=reject` too early.** If your SPF or DKIM isn't fully clean yet and you're rejecting on failure, you can block your own legitimate mail. Start with `p=none` to observe, then move to `quarantine` and eventually `reject` once you're confident everything is aligned.
+
+## Next.js + Resend: a minimal API route
+
+Install the package:
+
+```bash
+npm i resend
+```
+
+Add the API key as an environment variable:
+
+```
+RESEND_API_KEY=your_api_key_here
+```
+
+Create a route handler at `app/api/send/route.ts`:
+
+```typescript
+import { Resend } from 'resend';
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+export async function POST(req: Request) {
+	try {
+		const { to, name } = await req.json();
+
+		if (!to) {
+			return Response.json({ error: "Missing 'to' field" }, { status: 400 });
+		}
+
+		const result = await resend.emails.send({
+			from: 'Your App <send@yourdomain.com>',
+			to,
+			subject: `Welcome${name ? `, ${name}` : ''}!`,
+			html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+          <h2>Welcome${name ? `, ${name}` : ''} 👋</h2>
+          <p>Thanks for signing up. We're glad you're here.</p>
+        </div>
+      `,
+			replyTo: 'support@yourdomain.com'
+		});
+
+		return Response.json({ ok: true, result });
+	} catch (err: any) {
+		return Response.json(
+			{ error: err?.message ?? 'Unknown error' },
+			{ status: 500 }
+		);
+	}
+}
+```
+
+Test it locally with curl:
+
+```bash
+curl -X POST http://localhost:3000/api/send \
+  -H "Content-Type: application/json" \
+  -d '{"to":"youraddress@gmail.com","name":"Taha"}'
+```
+
+One thing worth repeating: don't expose this endpoint without rate limiting or auth in production. An open send route is an invitation for abuse.
+
+## Deliverability checklist
+
+Before shipping anything that sends email, I go through this:
+
+- Nameservers confirmed — records added in the correct DNS authority
+- DKIM records added and showing "Verified" in the provider dashboard
+- SPF record exists and includes your sending provider
+- DMARC record added (start with `p=none`)
+- From address uses the exact verified domain
+- Reply-To set to a monitored inbox (optional but recommended)
+- Sending endpoint protected with auth and rate limiting
+- Tested to Gmail, Outlook, and iCloud
+- Checked spam folder and verified SPF/DKIM/DMARC pass in "Show original" headers
+
+The last step is the one most people skip. Checking the raw headers in Gmail takes ten seconds and tells you immediately whether authentication is actually working end to end.
