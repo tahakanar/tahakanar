@@ -1,0 +1,242 @@
+---
+title: 'Row Level Security in Supabase: Patterns That Keep You Safe'
+date: '2026-03-09'
+description: 'Learn practical Supabase Postgres RLS patterns—ownership, multi-tenant org access, and admin roles—with reusable SQL policies and gotchas to avoid.'
+keywords:
+  [
+    'Supabase RLS',
+    'Postgres row level security',
+    'Supabase security policies',
+    'multi-tenant Supabase schema',
+    'Supabase organizations memberships',
+    'auth.uid() policy',
+    'role-based access control Postgres',
+    'secure Supabase database',
+    'RLS policy examples',
+    'Supabase best practices'
+  ]
+---
+
+Supabase makes it incredibly easy to ship fast. But sometimes "fast" accidentally means "public".
+
+You build a feature, it works perfectly on localhost, and then you realize any user could potentially fetch another user's data just by tweaking an ID in their API request.
+
+Row Level Security (RLS) is what stands between a secure app and a massive data leak. In this post, I want to share the practical, reusable RLS patterns I use for common product shapes (like users, teams, and roles), plus a few stupid gotchas that tripped me up early on.
+
+## Why RLS matters
+
+If you're building with Supabase, you're building on Postgres. That's a huge advantage because Postgres can enforce security right at the database layer, not just in your API code.
+
+Here's the mental model you need:
+
+- **Your frontend is completely untrusted.** Even if you hide UI buttons, anyone can grab your anon key and hit your Supabase endpoint with their own custom queries.
+- **Your API code is helpful, but not enough.** If you forget one `if (user.id !== resource.owner_id)` check in a route, that's a breach.
+- **RLS is your safety net.** It enforces the rules on every single query, automatically, down at the database level.
+
+Let's look at a simple SaaS schema and lock it down properly.
+
+## A clean baseline schema
+
+Most apps eventually need some concept of teams or organizations. We'll model three things: profiles, organizations, and memberships.
+
+```sql
+-- profiles (one per auth user)
+create table public.profiles (
+  id uuid primary key references auth.users (id) on delete cascade,
+  email text,
+  full_name text,
+  created_at timestamptz not null default now()
+);
+
+-- organizations (multi-tenant boundary)
+create table public.organizations (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  created_by uuid not null references public.profiles (id),
+  created_at timestamptz not null default now()
+);
+
+-- memberships (user <-> org)
+create table public.memberships (
+  org_id uuid not null references public.organizations (id) on delete cascade,
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  role text not null check (role in ('member', 'admin')),
+  created_at timestamptz not null default now(),
+  primary key (org_id, user_id)
+);
+```
+
+This structure is flexible. If you're building a single-tenant app, just give each user one org. If it's multi-tenant, users can belong to many.
+
+## Step 1: Enable RLS (yes, you have to do this explicitly)
+
+RLS is opt-in per table. You have to turn it on everywhere you store sensitive data.
+
+```sql
+alter table public.profiles enable row level security;
+alter table public.organizations enable row level security;
+alter table public.memberships enable row level security;
+```
+
+**Pro tip:** In the Supabase dashboard, tables can feel "secure" because your UI hides them. But if RLS is off, that data is readable by anyone with your public anon key. Treat the "RLS enabled" toggle as a strict requirement.
+
+## Step 2: The "user owns row" policy
+
+Supabase gives you `auth.uid()` inside Postgres to identify the logged-in user. The most basic policy is ownership: users can read and update their own profile.
+
+```sql
+-- Read your own profile
+create policy "profiles: select own"
+on public.profiles
+for select
+to authenticated
+using (id = auth.uid());
+
+-- Update your own profile
+create policy "profiles: update own"
+on public.profiles
+for update
+to authenticated
+using (id = auth.uid())
+with check (id = auth.uid());
+```
+
+Notice how the `update` policy has both `using` and `with check`?
+
+- `using` controls which _existing_ rows you're allowed to target.
+- `with check` controls what the _new_ row must look like after the update.
+
+If you forget `with check`, a user could technically update their profile ID to someone else's ID, breaking your data constraints.
+
+## Step 3: Multi-tenant access (orgs and memberships)
+
+Now for the real value: gating data by membership. You only want people to see organizations they belong to.
+
+```sql
+-- Users can see orgs they are a member of
+create policy "orgs: select if member"
+on public.organizations
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.memberships m
+    where m.org_id = organizations.id
+      and m.user_id = auth.uid()
+  )
+);
+```
+
+You'll use this `exists (select 1 from memberships ...)` pattern constantly. It's the core of multi-tenant RLS.
+
+What about seeing other members in your org?
+
+```sql
+-- Users can see memberships for orgs they belong to
+create policy "memberships: select if in org"
+on public.memberships
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.memberships m
+    where m.org_id = memberships.org_id
+      and m.user_id = auth.uid()
+  )
+);
+```
+
+This lets a user see who else is on their team, which is a very common requirement.
+
+## Step 4: Role-based permissions (admin only)
+
+Let's say any member can read the org data, but only admins can change the org name.
+
+```sql
+-- Only admins can update org
+create policy "orgs: update if admin"
+on public.organizations
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.memberships m
+    where m.org_id = organizations.id
+      and m.user_id = auth.uid()
+      and m.role = 'admin'
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.memberships m
+    where m.org_id = organizations.id
+      and m.user_id = auth.uid()
+      and m.role = 'admin'
+  )
+);
+```
+
+And for inviting or removing users, we restrict inserts and deletes on the `memberships` table to admins only:
+
+```sql
+-- Admins can insert memberships (invite)
+create policy "memberships: insert if admin"
+on public.memberships
+for insert
+to authenticated
+with check (
+  exists (
+    select 1
+    from public.memberships m
+    where m.org_id = memberships.org_id
+      and m.user_id = auth.uid()
+      and m.role = 'admin'
+  )
+);
+
+-- Admins can delete memberships (remove)
+create policy "memberships: delete if admin"
+on public.memberships
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.memberships m
+    where m.org_id = memberships.org_id
+      and m.user_id = auth.uid()
+      and m.role = 'admin'
+  )
+);
+```
+
+## Common footguns to avoid
+
+These are the mistakes that cost me hours of debugging:
+
+**"It works locally but not in production"**  
+You probably tested locally using the Service Role key (which completely bypasses RLS), but your production app uses the anon/public key.  
+_Rule:_ The frontend always uses the anon key and must pass RLS. Only use the Service Role key for trusted server-side background jobs.
+
+**Infinite recursion**  
+If you have a policy on `memberships` that queries `memberships`, Postgres can sometimes get stuck in an infinite loop depending on how it evaluates the query. If you hit recursion errors, you might need to create a `security definer` Postgres function to check roles instead of writing it directly in the policy.
+
+**Forgetting `with check` on inserts/updates**  
+If your table has an `org_id`, always use `with check` on inserts to ensure a user can't create a record assigned to an org they don't belong to.
+
+## A quick production checklist
+
+Before launching, I always run through this:
+
+- [ ] RLS is enabled on every table with sensitive data.
+- [ ] Every table has explicit `select`, `insert`, `update`, and `delete` policies (or intentional gaps where access isn't allowed).
+- [ ] Ownership rules use both `using` and `with check`.
+- [ ] Multi-tenant rules use membership `exists` checks.
+- [ ] The Service Role key is strictly kept out of the frontend code.
+- [ ] Tested the app logged in as a normal user with the anon key.
+
+RLS feels like extra work up front. It forces you to write SQL when you just want to build your UI. But once you set up these base patterns, you can sleep better knowing that a simple frontend bug won't leak your entire database.
