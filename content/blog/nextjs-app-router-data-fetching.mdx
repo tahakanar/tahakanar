@@ -1,0 +1,255 @@
+---
+title: 'Data Fetching in Next.js App Router: Server Components, Caching and Revalidation'
+date: '2026-03-13'
+description: 'Practical data fetching patterns for the Next.js App Router — Server Components, caching, revalidation, streaming, and the mistakes I made along the way.'
+keywords:
+  [
+    'Next.js App Router',
+    'Next.js data fetching',
+    'React Server Components',
+    'Next.js caching strategies',
+    'Next.js revalidation',
+    'Next.js fetch cache',
+    'Next.js streaming UI',
+    'Next.js loading.tsx',
+    'modern Next.js architecture',
+    'Next.js performance optimization'
+  ]
+---
+
+The Next.js App Router changed how we fetch data. Instead of pushing everything to the client with `useEffect`, we can now fetch directly in Server Components, stream UI progressively, and control caching with simple configuration. But I still see a lot of developers treating the App Router like the old Pages Router — and honestly, the transition isn't always obvious.
+
+In this post, I'll walk through practical patterns for data fetching, caching, and revalidation in the App Router — when to use Server Components, when you still need Client Components, and the mistakes I've seen (and made) along the way.
+
+## Why the App Router changes everything
+
+The biggest shift is React Server Components. In the App Router, every component is a Server Component by default. That means your component runs on the server, fetches whatever data it needs, and sends the rendered HTML to the browser.
+
+No client-side fetch. No loading spinner for initial content. No extra API layer between your component and your data.
+
+Here's what a basic page looks like:
+
+```tsx
+async function getPosts() {
+  const res = await fetch("https://api.example.com/posts");
+  return res.json();
+}
+
+export default async function Page() {
+  const posts = await getPosts();
+
+  return (
+    <div>
+      <h1>Blog Posts</h1>
+      {posts.map((post: any) => (
+        <div key={post.id}>{post.title}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+No hooks. No `useEffect`. No `useState` for loading states. Just an async function that fetches and renders.
+
+When I first saw this pattern, it felt wrong — like I was breaking the rules of React. But this is exactly how Server Components are supposed to work.
+
+## Fetching data directly — no API layer needed
+
+Because Server Components run on the server, you can access things that were previously off-limits in React: databases, private APIs, environment variables with secrets.
+
+```tsx
+import { db } from "@/lib/db";
+
+export default async function Page() {
+  const users = await db.user.findMany();
+
+  return (
+    <div>
+      {users.map((user) => (
+        <p key={user.id}>{user.email}</p>
+      ))}
+    </div>
+  );
+}
+```
+
+Instead of the old flow:
+
+```
+Client → API Route → Database
+```
+
+You can now do:
+
+```
+Server Component → Database
+```
+
+Fewer layers, less latency. I removed a bunch of unnecessary API routes from a project once I realized this. If the only consumer of an API route is your own frontend, you probably don't need it anymore.
+
+## Next.js caching — the confusing part
+
+This is where I got tripped up the most. Next.js has opinions about caching `fetch` requests, and the defaults aren't always obvious.
+
+There are three main strategies I use.
+
+**Default caching**
+
+```tsx
+fetch("https://api.example.com/posts");
+```
+
+Next.js may cache this response automatically. For static content like blog posts or marketing pages, this is usually fine. The page builds once and serves fast.
+
+**No caching (force fresh data)**
+
+If you need fresh data on every single request — dashboards, user-specific pages, real-time data — you disable the cache explicitly:
+
+```tsx
+async function getOrders() {
+  const res = await fetch("https://api.example.com/orders", {
+    cache: "no-store",
+  });
+
+  return res.json();
+}
+```
+
+I use `no-store` for anything that's tied to the current user or changes frequently. If you forget this on a dashboard page, you'll end up showing stale data to users and wonder what's going on.
+
+**Time-based revalidation**
+
+This is the sweet spot for most content. Cache the data, but refresh it periodically:
+
+```tsx
+async function getArticles() {
+  const res = await fetch("https://api.example.com/articles", {
+    next: { revalidate: 60 },
+  });
+
+  return res.json();
+}
+```
+
+This tells Next.js: "Serve the cached version, but rebuild it every 60 seconds." I use this for blog listings, product pages, and anything that updates occasionally but doesn't need real-time accuracy.
+
+The tricky part is choosing the right revalidation interval. Too short and you're basically hitting your API on every request. Too long and users see outdated content. For most content pages, something between 60 and 300 seconds works well.
+
+## Streaming and loading UI
+
+One of the features I didn't appreciate until I tried it: streaming.
+
+Instead of waiting for the entire page to finish loading on the server before sending anything to the browser, Next.js can send parts of the page as they become ready.
+
+You enable this by adding a `loading.tsx` file next to your page:
+
+```
+app/dashboard/
+  page.tsx
+  loading.tsx
+```
+
+```tsx
+// loading.tsx
+export default function Loading() {
+  return <p>Loading dashboard...</p>;
+}
+```
+
+If your dashboard fetch takes two seconds, the user sees the loading UI instantly while the server prepares the actual content. This makes a huge difference in perceived performance — the page doesn't feel "stuck" anymore.
+
+I started adding `loading.tsx` files to every route that hits an external API. It's minimal effort for a noticeable improvement.
+
+## When you still need Client Components
+
+Server Components handle data fetching well, but they can't do everything. Anything that involves browser interaction needs a Client Component:
+
+- `useState`, `useEffect`
+- Event handlers (`onClick`, `onChange`)
+- Browser APIs (`localStorage`, `window`)
+- Third-party libraries that use React state internally
+
+You mark a Client Component with the `"use client"` directive at the top of the file:
+
+```tsx
+"use client";
+
+import { useState } from "react";
+
+export default function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <button onClick={() => setCount(count + 1)}>
+      Count: {count}
+    </button>
+  );
+}
+```
+
+The rule I follow: **Server Components fetch data, Client Components handle interaction.** If a component doesn't need state or browser APIs, keep it as a Server Component.
+
+## A clean data fetching structure
+
+As a project grows, scattering `fetch` calls inside page components gets messy fast. I moved all my data fetching into a `lib/api` directory early on and it made a big difference:
+
+```
+src/
+  app/
+    dashboard/page.tsx
+  lib/
+    api/
+      posts.ts
+      users.ts
+```
+
+Each file exports async functions that handle the fetch, error checking, and caching config:
+
+```tsx
+// lib/api/posts.ts
+export async function getPosts() {
+  const res = await fetch("https://api.example.com/posts", {
+    next: { revalidate: 300 },
+  });
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch posts");
+  }
+
+  return res.json();
+}
+```
+
+Then the page stays clean:
+
+```tsx
+import { getPosts } from "@/lib/api/posts";
+
+export default async function Page() {
+  const posts = await getPosts();
+
+  return (
+    <div>
+      {posts.map((p: any) => (
+        <div key={p.id}>{p.title}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+Reusable data logic, easier to test, and your page components don't turn into a wall of fetch configuration.
+
+## Mistakes I made (so you don't have to)
+
+**Slapping `no-store` on everything.** When I first learned about caching issues, my reflex was to add `cache: "no-store"` everywhere. That works, but it kills performance. Every page load hits the origin server. Use it only where you genuinely need fresh data.
+
+**Building API routes for internal use.** I had several API routes that existed only because my old Pages Router code needed them. With Server Components, if the only consumer is your own app, you can skip the API route entirely and fetch directly in the component.
+
+**Forgetting error handling.** The `fetch` API doesn't throw on HTTP errors — a 500 response is still a "successful" fetch. Always check `res.ok` before parsing the response. I lost a good chunk of time debugging blank pages before I started adding proper error checks.
+
+## Wrapping up
+
+The mental model shift is this: fetch on the server, send minimal JavaScript to the client, and stream the UI for faster perceived performance. Once you stop reaching for `useEffect` by default and let Server Components do their thing, the code gets simpler and the pages get faster.
+
+It took me a few projects to fully trust the pattern. But now I reach for Server Components first and only drop into Client Components when I actually need interactivity. That's been the biggest win.

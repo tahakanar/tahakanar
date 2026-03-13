@@ -81,7 +81,7 @@ export default async function BlogPost({ params }) {
 								Taha Mutlu Kanar
 							</span>
 							<a
-								href='https://twitter.com/TahaKanar'
+								href='https://x.com/TahaKanar'
 								target='_blank'
 								rel='noopener noreferrer'
 								className='text-xs text-blue-600 dark:text-blue-400 hover:underline'

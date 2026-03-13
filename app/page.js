@@ -74,7 +74,7 @@ export default async function Home() {
 				</Link>
 				<Link
 					className='border border-1 flex-1 p-3 rounded-md flex justify-between items-center border-black dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-900/50 transition-colors'
-					href='https://twitter.com/TahaKanar'
+					href='https://x.com/TahaKanar'
 					target='_blank'
 				>
 					<div className='flex items-center space-x-3'>
