@@ -1,0 +1,211 @@
+---
+title: 'Stop Fighting TypeScript: Clean Patterns for React Developers'
+date: '2026-03-16'
+description: 'Learn practical TypeScript patterns for React including typed props, API responses, reusable types, and custom hooks to build safer, scalable apps.'
+keywords:
+  [
+    'React TypeScript patterns',
+    'TypeScript React best practices',
+    'type-safe React components',
+    'React TypeScript props typing',
+    'TypeScript custom hooks',
+    'React API typing',
+    'TypeScript utility types',
+    'scalable React architecture',
+    'TypeScript frontend best practices',
+    'React developer productivity'
+  ]
+---
+
+TypeScript can make React codebases incredibly reliable, or it can make you want to throw your laptop out the window.
+
+I've worked on teams that started with great intentions, but as soon as things got complicated, we started dropping `any` everywhere just to get features out the door. The truth is, you don't need advanced TypeScript wizardry to get 90% of the benefits.
+
+Over-engineering types slows you down, but weak types ruin the whole point of using TypeScript in the first place. Here are the practical patterns I actually use to keep React codebases safe without losing my mind.
+
+## Why TypeScript matters
+
+Without types, you probably spend a lot of time debugging things like this:
+
+```jsx
+// A classic undefined crash waiting to happen
+function UserCard({ user }) {
+	return <div>{user.name.toUpperCase()}</div>;
+}
+```
+
+If `user.name` is missing, the app crashes. TypeScript forces you to define the shape of your data upfront, catching these issues in your editor before they ever reach production.
+
+Here is the same component with TypeScript:
+
+```tsx
+type User = {
+	id: string;
+	name: string;
+};
+
+type UserCardProps = {
+	user: User;
+};
+
+function UserCard({ user }: UserCardProps) {
+	return <div>{user.name.toUpperCase()}</div>;
+}
+```
+
+Now TypeScript guarantees that `user.name` exists and is a string. No more guessing.
+
+## 1. Typing component props correctly
+
+Stop typing props inline every time you write a component. It gets messy fast. Define clear, reusable types instead.
+
+```tsx
+type ButtonProps = {
+	label: string;
+	onClick: () => void;
+	disabled?: boolean;
+};
+
+export function Button({ label, onClick, disabled }: ButtonProps) {
+	return (
+		<button onClick={onClick} disabled={disabled}>
+			{label}
+		</button>
+	);
+}
+```
+
+### Extending native HTML elements
+
+Sometimes you just want a standard `<button>` that accepts all the normal HTML attributes, plus a few custom ones. You don't need to manually type `disabled`, `type`, `aria-label`, etc.
+
+```tsx
+type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
+	variant?: 'primary' | 'secondary';
+};
+
+export function Button({ variant = 'primary', ...props }: ButtonProps) {
+	return <button className={`btn btn-${variant}`} {...props} />;
+}
+```
+
+Now you can do `<Button onClick={...} disabled aria-label="Save" />` and TypeScript knows exactly what's allowed.
+
+## 2. Avoiding the `any` trap with API responses
+
+The API layer is where most projects completely lose their type safety. If you do this, you're throwing away TypeScript's biggest advantage:
+
+```typescript
+// Don't do this
+const data: any = await fetch('/api/users').then(res => res.json());
+```
+
+Instead, define exactly what you expect from the backend and enforce it at the boundary.
+
+```typescript
+type User = {
+	id: string;
+	email: string;
+	createdAt: string;
+};
+
+async function fetchUsers(): Promise<User[]> {
+	const res = await fetch('/api/users');
+	return res.json();
+}
+```
+
+Now, when you use this in a React component, TypeScript knows exactly what data you're dealing with:
+
+```tsx
+const [users, setUsers] = useState<User[]>([]);
+```
+
+## 3. Reusable types and utility patterns
+
+As the project grows, copy-pasting types gets painful. Keep shared types in a dedicated folder (e.g., `src/types/user.ts`) and import them where needed.
+
+TypeScript also has built-in utility types that save you from repeating yourself.
+
+**Need an object where every field is optional?** Use `Partial`:
+
+```typescript
+type UpdateUserPayload = Partial<User>;
+```
+
+**Need an object with only specific fields?** Use `Pick`:
+
+```typescript
+type UserPreview = Pick<User, 'id' | 'email'>;
+```
+
+These utilities let you derive new types from your core domain models without rewriting them from scratch.
+
+## 4. Strongly typed custom hooks
+
+If you're writing custom hooks, typing the return values properly is crucial because it propagates safety to every component that uses the hook.
+
+```tsx
+export function useUsers() {
+	const [users, setUsers] = useState<User[]>([]);
+	const [loading, setLoading] = useState(false);
+
+	async function loadUsers() {
+		setLoading(true);
+		const res = await fetch('/api/users');
+		const data: User[] = await res.json();
+
+		setUsers(data);
+		setLoading(false);
+	}
+
+	return { users, loading, loadUsers };
+}
+```
+
+Now, any component calling `const { users } = useUsers()` gets full autocomplete and error checking for `User`.
+
+## 5. Safer event handling
+
+React events are historically annoying to type if you don't know the exact names. Here are the two you'll use 95% of the time.
+
+**Input changes:**
+
+```tsx
+function SearchInput() {
+	const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+		console.log(e.target.value);
+	};
+
+	return <input onChange={handleChange} />;
+}
+```
+
+**Button clicks:**
+
+```tsx
+function SaveButton() {
+	const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+		console.log('clicked');
+	};
+
+	return <button onClick={handleClick}>Save</button>;
+}
+```
+
+Typing these correctly prevents you from guessing what properties exist on the event object.
+
+## A few rules of thumb for large codebases
+
+If I could go back and tell myself a few things when I started using TypeScript with React, it would be these:
+
+1. **Avoid `any` like the plague.** If you truly don't know what the data is, use `unknown`. It forces you to validate the data before you can use it, which is exactly what you should be doing anyway.
+2. **Prefer simple interfaces and types.** You rarely need crazy generic types that look like a math equation. Simple types are easier to read and faster for the TypeScript compiler to process.
+3. **Type the boundaries.** The most important places to have strong types are your API responses, your database models, and your component props. Get those right, and TypeScript will infer the rest.
+4. **Keep types close to the domain.** Instead of dumping every single type into one giant `types.ts` file, group them by feature (e.g., `features/users/types.ts`). This makes large codebases much easier to navigate.
+
+## Where to go from here
+
+If you want to level up your TypeScript skills beyond the basics, I highly recommend checking out [Total TypeScript](https://www.totaltypescript.com/) by Matt Pocock. He has an incredible way of explaining complex TypeScript concepts without making your head spin. His beginner tutorials and React-specific TypeScript guides are some of the best resources on the internet.
+
+TypeScript is most powerful when used practically, not perfectly. Focus on typing your data correctly at the edges, and you'll notice a massive drop in runtime errors.

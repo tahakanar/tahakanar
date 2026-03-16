@@ -117,14 +117,14 @@ export default async function Home() {
 				<h2 className='text-2xl font-bold mb-6 text-black dark:text-primary'>
 					Latest Posts
 				</h2>
-				<div className='flex flex-col space-y-8'>
+				<div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-4'>
 					{posts.map(post => (
 						<Link
 							key={post.slug}
 							href={`/blog/${post.slug}`}
-							className='group flex flex-col p-6 -mx-6 rounded-2xl hover:bg-gray-100 dark:hover:bg-gray-900/50 transition-all duration-300'
+							className='group flex flex-col p-6 rounded-xl bg-white dark:bg-[#111] border border-gray-200 dark:border-gray-800/60 shadow-sm hover:shadow-md hover:scale-[1.02] transition-all duration-300'
 						>
-							<div className='flex items-center space-x-2.5 text-xs text-gray-500 dark:text-gray-400 mb-2'>
+							<div className='flex items-center space-x-2.5 text-xs text-gray-500 dark:text-gray-400 mb-4'>
 								<time dateTime={post.meta.date} className='font-medium'>
 									{new Date(post.meta.date).toLocaleDateString('en-US', {
 										month: 'short',
@@ -136,17 +136,19 @@ export default async function Home() {
 								<span>{post.meta.readingTime} min read</span>
 							</div>
 
-							<ViewTransition name={`post-title-${post.slug}`}>
-								<h3 className='text-lg sm:text-xl font-bold text-black dark:text-primary mb-2 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors'>
-									{post.meta.title}
-								</h3>
-							</ViewTransition>
+							<div className='flex-grow'>
+								<ViewTransition name={`post-title-${post.slug}`}>
+									<h3 className='text-lg font-bold text-black dark:text-primary mb-3 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors line-clamp-2'>
+										{post.meta.title}
+									</h3>
+								</ViewTransition>
 
-							<p className='text-sm text-gray-600 dark:text-gray-400 leading-relaxed mb-3 line-clamp-2'>
-								{post.meta.description}
-							</p>
+								<p className='text-sm text-gray-600 dark:text-gray-400 leading-relaxed mb-6 line-clamp-3'>
+									{post.meta.description}
+								</p>
+							</div>
 
-							<span className='text-xs font-semibold text-blue-600 dark:text-blue-400 flex items-center '>
+							<span className='text-xs font-semibold text-blue-600 dark:text-blue-400 flex items-center mt-auto'>
 								Read article
 								<span className='group-hover:translate-x-1 transition-transform duration-300'>
 									<svg
