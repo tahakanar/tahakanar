@@ -1,0 +1,888 @@
+---
+title: 'React Query + TypeScript: Type-Safe Server State Management'
+date: '2026-03-26'
+description: 'A deep dive into how TanStack Query and TypeScript work together in a production dashboard — covering typed fetchers, query keys, Zod schemas, cache manipulation, and scalable query architecture.'
+keywords:
+  [
+    'React Query TypeScript',
+    'TanStack Query TypeScript',
+    'useQuery TypeScript',
+    'useMutation TypeScript',
+    'React Query best practices',
+    'typed fetcher React Query',
+    'Zod React Hook Form React Query',
+    'queryClient setQueryData TypeScript',
+    'React Query cache management',
+    'React Query architecture',
+    'server state management React',
+    'React Query query keys pattern',
+    'Next.js React Query TypeScript'
+  ]
+---
+
+TanStack Query (React Query) is the gold standard for managing server state in React applications. But without TypeScript wired up correctly, you lose most of its power—and gain a false sense of safety.
+
+This article walks through how a production dashboard connects React Query and TypeScript end-to-end: from the typed `fetcher` utility and `IApiResponse<T>` contract, all the way to cache manipulation in mutation callbacks.
+
+If you're using React Query without full type coverage—this is the setup you actually want.
+
+---
+
+## The Foundation: A Generic API Response Contract
+
+Every API in this project returns the same shaped response. The first step is modeling that contract as a TypeScript interface.
+
+```ts
+// common/interfaces/IApiResponse.ts
+import type { TRequirement } from '@/common/types';
+
+export interface IApiResponse<T> {
+  success: boolean;
+  data: T;
+  requirement: TRequirement | null;
+  code?: number;
+  message?: string;
+  meta?: {
+    current_page: number;
+    from: number;
+    last_page: number;
+    links: { url: string; label: string; active: boolean }[];
+    path: string;
+    per_page: number;
+    to: number;
+    total: number;
+  };
+}
+```
+
+`IApiResponse<T>` is the generic envelope. The actual payload lives in `data: T`. Pagination metadata, messages, error codes and requirement flags all travel alongside it in a predictable structure.
+
+This single interface is the source of truth that everything else derives from.
+
+---
+
+## The Typed Fetcher: One Place, Full Coverage
+
+Instead of calling `fetch` directly in every query function, the project centralizes all HTTP logic in a single generic `fetcher` utility:
+
+```ts
+// utils/fetcher.ts
+import type { IApiResponse, IError } from '@/common/interfaces';
+
+const BASE_URL = '/api/v1';
+
+export default async function fetcher<T>(
+  url: string,
+  options: RequestInit,
+  abortTime = 20000,
+  controller?: AbortController
+): Promise<IApiResponse<T>> {
+  const header = new Headers();
+
+  if (!(options.body instanceof FormData)) {
+    header.set('Content-Type', 'application/json');
+  }
+  header.set('Accept', 'application/json');
+
+  const localController = controller ?? new AbortController();
+  const timeoutId = setTimeout(() => localController.abort(), abortTime);
+
+  try {
+    const response = await fetch(`${BASE_URL}${url}`, {
+      ...options,
+      headers: header,
+      signal: localController.signal
+    });
+
+    if (!response.ok) {
+      const errorObj: IError = {
+        status: response.status,
+        statusText: response.statusText,
+        message: '',
+        code: 0,
+        requirement: null
+      };
+
+      try {
+        const errorResponse = (await response.json()) as IApiResponse<null>;
+        errorObj.message = errorResponse.message || 'No message provided';
+        errorObj.code = errorResponse.code || 0;
+        errorObj.requirement = errorResponse.requirement;
+      } catch {
+        errorObj.message = 'An unknown error occurred. Please try again.';
+      }
+
+      throw errorObj;
+    }
+
+    return (await response.json()) as IApiResponse<T>;
+  } catch (err: unknown) {
+    if (typeof err === 'object' && err !== null && 'status' in err) throw err;
+
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw {
+        status: 0,
+        statusText: 'AbortError',
+        message: 'Request timed out',
+        code: 0,
+        requirement: null
+      } as IError;
+    }
+
+    throw {
+      status: 0,
+      statusText: 'Unknown',
+      message: err instanceof Error ? err.message : 'Unknown error',
+      code: 0,
+      requirement: null
+    } as IError;
+  } finally {
+    clearTimeout(timeoutId);
+    localController.abort();
+  }
+}
+```
+
+### Why this matters
+
+- `fetcher<T>` returns `Promise<IApiResponse<T>>`. TypeScript infers `T` at the call site.
+- Error normalization happens once. Every error path produces a typed `IError` object—no `unknown` leaking into query callbacks.
+- `FormData` detection handles file uploads automatically—no `Content-Type` override, so the browser sets the correct multipart boundary.
+- Built-in request cancellation via `AbortController` with a configurable timeout prevents hanging requests.
+
+The error interface is equally minimal but complete:
+
+```ts
+// common/interfaces/IError.ts
+export interface IError {
+  status: number;
+  statusText: string;
+  message: string;
+  code: number;
+  requirement: TRequirement | null;
+}
+```
+
+React Query's `error` field in `useQuery` and `useMutation` will always be typed as `IError`—not `unknown`—because the fetcher consistently throws this shape.
+
+---
+
+## Query Keys: Typed, Centralized, Namespaced
+
+Hardcoded strings as query keys don't scale. This project uses a single exported constant object `QK` (Query Keys) mirroring the domain structure of the application:
+
+```ts
+// common/constants/queryKeys.ts
+export const QK = {
+  ORDER: {
+    LIST: 'orderList',
+    DETAILS: 'orderDetails',
+    CREATE: 'orderCreate',
+    UPDATE: {
+      STATUS: 'orderUpdateStatus',
+      DETAILS: 'orderUpdateDetails'
+    },
+    DELETE: 'orderDelete',
+    SHIPPING: {
+      DETAILS: 'orderShippingDetails'
+    },
+    NOTE: {
+      LIST: 'orderNoteList',
+      CREATE: 'orderNoteCreate',
+      DELETE: 'orderNoteDelete',
+      UPDATE: 'orderNoteUpdate'
+    }
+  },
+  PRODUCT: {
+    LIST: 'productList',
+    DETAILS: 'productDetails',
+    VARIANT: {
+      LIST: 'productVariantList',
+      ADD: 'productVariantAdd',
+      DELETE: 'productVariantDelete',
+      UPDATE: { STATUS: 'productVariantUpdateStatus' }
+    }
+    // ... and so on
+  }
+  // ... all other domains
+};
+```
+
+The same structure exists for endpoints in `EP` (Endpoints):
+
+```ts
+// common/constants/endPoints.ts
+export const EP = {
+  ORDER: {
+    LIST: '/api/order/list',
+    DETAILS: '/api/order/details',
+    SHIPPING: {
+      DETAILS: '/api/order/shipping/details'
+    },
+    NOTE: {
+      LIST: '/api/order/note/list',
+      UPDATE: '/api/order/note/update'
+    }
+    // ...
+  }
+};
+```
+
+### Why this structure works
+
+- **No magic strings.** `QK.ORDER.NOTE.LIST` is refactor-safe. Rename it once in `queryKeys.ts` and TypeScript catches every usage.
+- **Namespace isolation.** `QK.PRODUCT.VARIANT.LIST` and `QK.ORDER.LIST` can never accidentally collide.
+- **Mirrors the domain.** The shape of `QK` reflects the application's entity hierarchy, making it self-documenting.
+
+Query keys are always used as arrays—the constant value is the first element, followed by parameters that scope the cache entry:
+
+```ts
+queryKey: [QK.ORDER.DETAILS, guid]; // scoped by entity ID
+queryKey: [QK.ORDER.LIST, body]; // scoped by filter params
+queryKey: [QK.ORDER.NOTE.LIST, order_guid]; // scoped by parent ID
+```
+
+---
+
+## Writing Typed Queries
+
+All queries live in domain-scoped files under `queries/`. Here is the pattern in full:
+
+```ts
+// queries/order.query.ts
+import { useQuery } from '@tanstack/react-query';
+import type { IOrder, IOrderFilterParams } from '@/common/interfaces';
+import { QK, EP } from '@/common/constants';
+import { EHTTPMethod } from '@/common/enums';
+import fetcher from '@/utils/fetcher';
+
+export function useOrderList(body: IOrderFilterParams, enabled = true) {
+  return useQuery({
+    queryKey: [QK.ORDER.LIST, body],
+    enabled,
+    queryFn: () =>
+      fetcher<IOrder[]>(EP.ORDER.LIST, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify(body)
+      })
+  });
+}
+
+export function useOrderDetails(guid: string, enabled = true) {
+  return useQuery({
+    queryKey: [QK.ORDER.DETAILS, guid],
+    enabled,
+    queryFn: () =>
+      fetcher<IOrder>(EP.ORDER.DETAILS, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify({ guid })
+      })
+  });
+}
+```
+
+### What TypeScript infers automatically
+
+Because `fetcher<IOrder[]>` returns `Promise<IApiResponse<IOrder[]>>`, React Query infers the full return type of `useOrderList`:
+
+```ts
+const { data, isLoading, isError } = useOrderList(filters);
+
+data; // IApiResponse<IOrder[]> | undefined
+data?.data; // IOrder[] | undefined
+data?.meta; // pagination metadata | undefined
+```
+
+No type assertions needed. The generic flows from `fetcher<T>` → `queryFn` → `useQuery` → component.
+
+The `enabled` parameter is a first-class pattern here. It prevents queries from firing until required conditions are met—a parent ID is loaded, a user action has occurred, etc.—without any conditional hook violations.
+
+---
+
+## Writing Typed Mutations
+
+Mutations follow a consistent structure. The mutation function (`mutationFn`) receives a typed input, calls `fetcher`, and the `onSuccess` callback receives the fully typed response:
+
+```ts
+export function useOrderCreate() {
+  return useMutation({
+    mutationKey: [QK.ORDER.CREATE],
+    mutationFn: (body: TOrderCreateOutput) => {
+      const copyData = { ...body };
+      delete copyData.categoryObj; // UI-only helper field
+      delete copyData.currencyObj; // UI-only helper field
+
+      return fetcher<IOrder>(EP.ORDER.CREATE, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify(copyData)
+      });
+    },
+    onSuccess: response => {
+      toast.success('Success', {
+        description: response.message || 'Order has been created.'
+      });
+    }
+  });
+}
+```
+
+`TOrderCreateOutput` is the Zod-inferred type from the form schema (more on this below). The `response` in `onSuccess` is `IApiResponse<IOrder>`—fully typed, no casting needed.
+
+In the component:
+
+```tsx
+const { mutate: createOrder, isPending } = useOrderCreate();
+
+createOrder(formData, {
+  onSuccess: () => router.push('/orders')
+});
+```
+
+`mutate` is typed to accept exactly `TOrderCreateOutput`—the same type the backend expects. If you pass the wrong shape, TypeScript catches it at compile time.
+
+---
+
+## The Zod ↔ React Query Bridge
+
+Form validation and API call types share the same source of truth: Zod schemas. This is one of the most powerful patterns in the project.
+
+```ts
+// schemas/order.schema.ts
+import { z } from 'zod';
+
+export const orderCreateSchema = (t: typeof TranslationFunction) => {
+  return z.object({
+    title: z.string().nonempty({
+      message: t('formValidation.nonempty', { field: t('orders.title') })
+    }),
+    amount: z.string().nonempty({
+      message: t('formValidation.nonempty', { field: t('orders.amount') })
+    }),
+    currency: z.string().nonempty({
+      message: t('formValidation.nonempty', { field: t('common.currency') })
+    }),
+    category: z.string().nonempty({
+      message: t('formValidation.nonempty', { field: t('common.category') })
+    }),
+    categoryObj: z
+      .object({ code: z.string(), name: z.string() })
+      .optional()
+      .nullable(),
+    currencyObj: z
+      .object({ code: z.string(), name: z.string(), flag: z.string() })
+      .optional()
+      .nullable()
+  });
+};
+
+export type TOrderCreateInput = z.input<ReturnType<typeof orderCreateSchema>>;
+export type TOrderCreateOutput = z.output<ReturnType<typeof orderCreateSchema>>;
+```
+
+Two types are derived:
+
+- **`TOrderCreateInput`** — what the form field values look like before transformation.
+- **`TOrderCreateOutput`** — what Zod produces after parsing (e.g., after coercion or `.transform()`). This is what gets passed to `mutationFn`.
+
+The distinction matters: `input` is what the user types, `output` is what the API receives. They can differ—for instance, when a field is optional in the form but required after a `.transform()`.
+
+### The cleanup pattern
+
+Notice in the mutation:
+
+```ts
+mutationFn: (body: TOrderCreateOutput) => {
+  const copyData = { ...body };
+  delete copyData.categoryObj; // UI-only field
+  delete copyData.currencyObj; // UI-only field
+
+  return fetcher<IOrder>(EP.ORDER.CREATE, {
+    method: EHTTPMethod.POST,
+    body: JSON.stringify(copyData)
+  });
+};
+```
+
+`categoryObj` and `currencyObj` are UI display helpers—they carry the full objects for rendering in the form (e.g., a label alongside the selected value). They don't belong in the API payload. The mutation strips them before serialization. TypeScript allows this because these fields are typed as `optional` in the schema.
+
+This is the right place to do this cleanup—not in the form, not in a component, but in the mutation function that owns the API call contract.
+
+---
+
+## Cache Manipulation: setQueryData vs invalidateQueries
+
+This is where React Query's power fully materializes—and where TypeScript earns its keep.
+
+### Pattern 1: Direct cache update (optimistic-style)
+
+When a mutation returns the full updated entity, you can write it directly into the cache—no extra network request needed:
+
+```ts
+export function useOrderUpdateDetails() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationKey: [QK.ORDER.UPDATE.DETAILS],
+    mutationFn: (body: TOrderUpdateDetailsOutput) =>
+      fetcher<IOrder>(EP.ORDER.UPDATE.DETAILS, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify(body)
+      }),
+    onSuccess: response => {
+      queryClient.setQueryData([QK.ORDER.DETAILS, response.data.guid], {
+        data: response.data,
+        success: true,
+        requirement: null
+      });
+
+      toast.success('Success', { description: response.message });
+    }
+  });
+}
+```
+
+`response.data.guid` is typed as `string` because `response` is `IApiResponse<IOrder>` and `IOrder` extends `IBase` which has `guid: string`. No runtime guessing, no casting.
+
+### Pattern 2: List append after create
+
+When creating a new item in a list, you can append it to the existing cached array instead of invalidating the entire list:
+
+```ts
+export function useOrderNoteCreate() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (body: TOrderNoteCreateOutput) =>
+      fetcher<IOrderNote>(EP.ORDER.NOTE.CREATE, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify(body)
+      }),
+    onSuccess: (response, variables) => {
+      const currentData = queryClient.getQueryData<{ data: IOrderNote[] }>([
+        QK.ORDER.NOTE.LIST,
+        variables.order_guid
+      ]);
+
+      if (currentData?.data) {
+        const updatedNotes = [...currentData.data, response.data];
+
+        queryClient.setQueryData([QK.ORDER.NOTE.LIST, variables.order_guid], {
+          data: updatedNotes,
+          success: true,
+          requirement: null
+        });
+      } else {
+        void queryClient.invalidateQueries({
+          queryKey: [QK.ORDER.NOTE.LIST, variables.order_guid]
+        });
+      }
+
+      toast.success('Success', { description: response.message });
+    }
+  });
+}
+```
+
+The `getQueryData<{ data: IOrderNote[] }>` generic tells TypeScript what shape to expect from the cache. The `if (currentData?.data)` guard handles the case where the cache doesn't exist yet—falling back to `invalidateQueries` which triggers a re-fetch.
+
+### Pattern 3: List update in place
+
+For updates within a list, `.map()` replaces the matching item:
+
+```ts
+onSuccess: (response, variables) => {
+  const currentData = queryClient.getQueryData<{ data: IOrderNote[] }>([
+    QK.ORDER.NOTE.LIST,
+    variables.order_guid
+  ]);
+
+  if (currentData?.data) {
+    const updatedNotes = currentData.data.map(note =>
+      note.guid === response.data.guid ? response.data : note
+    );
+
+    queryClient.setQueryData([QK.ORDER.NOTE.LIST, variables.order_guid], {
+      data: updatedNotes,
+      success: true,
+      requirement: null
+    });
+  }
+};
+```
+
+### Pattern 4: List filter after delete
+
+```ts
+onSuccess: (response, variables) => {
+  const currentData = queryClient.getQueryData<{ data: IOrderNote[] }>([
+    QK.ORDER.NOTE.LIST,
+    variables.order_guid
+  ]);
+
+  if (currentData?.data) {
+    const updatedNotes = currentData.data.filter(
+      note => note.guid !== variables.note_guid
+    );
+
+    queryClient.setQueryData([QK.ORDER.NOTE.LIST, variables.order_guid], {
+      data: updatedNotes,
+      success: true,
+      requirement: null
+    });
+  }
+};
+```
+
+### When to use `invalidateQueries`
+
+Use `setQueryData` when:
+
+- The mutation response returns the full updated entity.
+- You want zero additional network requests.
+- The list is small enough that a local array operation is safe.
+
+Use `invalidateQueries` when:
+
+- The mutation doesn't return enough data to reconstruct the cache (e.g., a simple `{ success: true }` response).
+- The cache entry doesn't exist yet.
+- Stale data would be a correctness risk.
+
+Both are valid. The key is being deliberate about the choice.
+
+---
+
+## Nested Cache Updates: The Child-in-Parent Pattern
+
+Some cache entries contain nested arrays. Consider a `IProductVariant` nested inside `IProduct`:
+
+```ts
+export interface IProduct extends Omit<IBase, 'status' | 'status_label'> {
+  name: string;
+  sku: string;
+  variants: IProductVariant[];
+  is_active: boolean;
+}
+```
+
+When a variant is added, the product list is already cached. You need to find the right product and append a variant to its `variants` array—without re-fetching the entire product list:
+
+```ts
+export function useProductVariantAdd() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (body: TProductVariantAddOutput) =>
+      fetcher<IProductVariant>(EP.PRODUCT.VARIANT.ADD, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify(body)
+      }),
+    onSuccess: (response, variables) => {
+      const currentData = queryClient.getQueryData<{ data: IProduct[] }>([
+        QK.PRODUCT.LIST,
+        variables.category_guid
+      ]);
+
+      if (currentData?.data) {
+        const updatedProducts = currentData.data.map(product => {
+          if (product.guid === response.data.product_guid) {
+            return {
+              ...product,
+              variants: [...(product.variants || []), response.data]
+            };
+          }
+          return product;
+        });
+
+        queryClient.setQueryData([QK.PRODUCT.LIST, variables.category_guid], {
+          data: updatedProducts,
+          success: true,
+          requirement: null
+        });
+      } else {
+        void queryClient.invalidateQueries({
+          queryKey: [QK.PRODUCT.LIST, variables.category_guid]
+        });
+      }
+    }
+  });
+}
+```
+
+The `response.data.product_guid` field—typed via `IProductVariant`—is the join key. TypeScript verifies at compile time that both `response.data` and `product.guid` are strings. The spread `[...(product.variants || []), response.data]` handles the edge case where `variants` might be undefined on first load.
+
+---
+
+## Derived Interfaces with TypeScript Utility Types
+
+The project uses `Pick`, `Omit`, and `extends` throughout its interface hierarchy. This removes redundancy and keeps types in sync:
+
+```ts
+// IBase.ts — the shared foundation
+export interface IBase {
+  guid: string;
+  created_at: string;
+  updated_at: string;
+  status: TStatus;
+  status_label: string;
+}
+
+// IProduct.ts
+export interface IProduct extends IBase {
+  owner: Pick<IUser, 'guid' | 'name' | 'email'>;
+  name: string;
+  sku: string;
+  logo: string;
+  category: string;
+  country: Pick<IUtilsCountry, 'code' | 'name' | 'flag'>;
+  currency: Omit<ICurrency, keyof IBase>;
+}
+
+// IProductDetail extends IProduct with additional fields
+export interface IProductDetail extends IProduct {
+  description: string;
+}
+
+// Some entities omit status-related fields
+export interface IProductVariant extends Omit<
+  IBase,
+  'status' | 'status_label'
+> {
+  sku: string;
+  label: string;
+  is_active: boolean;
+}
+```
+
+`Omit<ICurrency, keyof IBase>` is a clean way to embed a sub-entity without duplicating `guid`, `created_at`, etc. `Pick<IUser, 'guid' | 'name' | 'email'>` embeds only the fields relevant to the relationship—not the full entity. This keeps API response types slim and accurate.
+
+---
+
+## The `enabled` Flag: Conditional Queries Without Hook Violations
+
+React hooks can't be called conditionally. React Query's `enabled` option is the correct way to suspend a query until a condition is met:
+
+```ts
+export function useOrderShippingDetails(order_guid: string, enabled = true) {
+  return useQuery({
+    queryKey: [QK.ORDER.SHIPPING.DETAILS, order_guid],
+    enabled,
+    queryFn: () =>
+      fetcher<IOrderShipping | null>(EP.ORDER.SHIPPING.DETAILS, {
+        method: EHTTPMethod.POST,
+        body: JSON.stringify({ order_guid })
+      })
+  });
+}
+```
+
+The return type is `IOrderShipping | null` because shipping details may not exist yet for a new order. TypeScript forces the consuming component to handle the `null` case—it won't let you access `data.data.address` without a null check.
+
+In the component:
+
+```tsx
+const { data: shippingDetails } = useOrderShippingDetails(guid, !!guid);
+// shippingDetails?.data?.address — safe access
+```
+
+---
+
+## File Upload with FormData: Automatic Content-Type Handling
+
+Some mutations send files. The `fetcher` utility detects `FormData` and skips the `Content-Type: application/json` header—letting the browser set the correct multipart boundary:
+
+```ts
+export function useProductUpdateLogo() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationKey: [QK.PRODUCT.UPDATE.LOGO],
+    mutationFn: (body: { guid: string; file: File }) => {
+      const formData = new FormData();
+      formData.append('guid', body.guid);
+      formData.append('file', body.file);
+
+      return fetcher<IProductDetail>(EP.PRODUCT.UPDATE.LOGO, {
+        method: EHTTPMethod.POST,
+        body: formData // ← FormData, not JSON.stringify
+      });
+    },
+    onSuccess: response => {
+      queryClient.setQueryData([QK.PRODUCT.DETAILS, response.data.guid], {
+        data: response.data,
+        success: true,
+        requirement: null
+      });
+
+      toast.success('Success', { description: response.message });
+    }
+  });
+}
+```
+
+The `mutationFn` accepts `{ guid: string; file: File }` — a plain TypeScript type, not a Zod schema, because file inputs don't benefit from Zod parsing. The rest follows the same pattern: `fetcher<IProductDetail>` infers the response type, and `onSuccess` updates the cache directly.
+
+---
+
+## Architecture: Query Files as Domain Boundaries
+
+All queries and mutations are organized into domain-scoped files:
+
+```
+queries/
+  order.query.ts      ← useOrderList, useOrderCreate, useOrderUpdateDetails...
+  product.query.ts    ← useProductList, useProductVariantAdd, useProductUpdateLogo...
+  customer.query.ts   ← customer-specific queries and mutations
+  user.query.ts       ← user management
+  utils.query.ts      ← shared lookup data (countries, currencies, permissions...)
+  ...
+```
+
+This keeps each file focused on a single domain. `product.query.ts` is the only place that knows about `IProduct`, `IProductDetail`, `IProductVariant` and their mutations. There is no shared mutation store, no global query registry.
+
+Components import only what they need:
+
+```tsx
+import { useOrderList, useOrderUpdateDetails } from '@/queries/order.query';
+import { useUtilsPayment, useUtilsCurrency } from '@/queries/utils.query';
+import { useProductList } from '@/queries/product.query';
+```
+
+This is the equivalent of RTK Query's `injectEndpoints`—but without a shared API registry. Each domain is independent.
+
+---
+
+## Zustand for Client State, React Query for Server State
+
+React Query handles server state. Zustand handles client-only state that doesn't need to be fetched or cached:
+
+```ts
+// stores/auth.store.ts
+import { create } from 'zustand';
+import type { IProfile, IStoredUser } from '@/common/interfaces';
+
+type AuthState = {
+  token: string | null;
+  user: IStoredUser | null;
+  setToken: (_token: string) => void;
+  setUser: (_data: IProfile) => void;
+  logout: () => void;
+  getUser: () => IStoredUser | null;
+};
+
+export const useAuthStore = create<AuthState>(set => ({
+  token: getCookie('****_admin_token'),
+  user:
+    typeof window !== 'undefined'
+      ? JSON.parse(localStorage.getItem('user') ?? 'null')
+      : null,
+
+  setToken: token => {
+    setCookie('****_admin_token', token, 150);
+    set({ token });
+  },
+
+  setUser: data => {
+    const storedUser: IStoredUser = {
+      name: data.name,
+      surname: data.surname,
+      email: data.email,
+      role: data.role.name,
+      permissions: data.role.permissions
+    };
+    localStorage.setItem('user', JSON.stringify(storedUser));
+    set({ user: storedUser });
+  },
+
+  logout: () => {
+    deleteCookie('****_admin_token', '');
+    localStorage.removeItem('user');
+    set({ token: null, user: null });
+  }
+}));
+```
+
+Auth state is never fetched—it's read from cookies and localStorage on boot, then mutated locally. Putting it in React Query would be wrong because there's no `queryFn` to call. Putting it in a React context would cause re-renders across the tree on every login/logout. Zustand is the right tool.
+
+**The rule is simple:**
+
+- **React Query** → anything that comes from or goes to an API
+- **Zustand** → client-side state that lives between page loads (auth, UI preferences)
+- **`useState` / `useReducer`** → local ephemeral state (dialogs, filters, pagination)
+
+---
+
+## Common Mistakes
+
+### Using `any` in `getQueryData`
+
+```ts
+// wrong
+const currentData = queryClient.getQueryData([QK.ORDER.NOTE.LIST, id]);
+
+// correct
+const currentData = queryClient.getQueryData<{ data: IOrderNote[] }>([
+  QK.ORDER.NOTE.LIST,
+  id
+]);
+```
+
+Without the generic, `currentData` is `unknown`. You can't access `.data` on `unknown`. The generic gives you full type inference for the rest of the callback.
+
+### Putting UI state in query keys
+
+```ts
+// wrong — dialog open/closed state should never affect a query key
+queryKey: [QK.ORDER.LIST, body, isDialogOpen];
+
+// correct — only params that affect the API response belong in the key
+queryKey: [QK.ORDER.LIST, body];
+```
+
+Query keys are the cache key. Any value in the key that changes causes a re-fetch. Dialog state is not a cache dimension.
+
+### Not handling the null fallback in `getQueryData`
+
+```ts
+// wrong — crashes if cache is empty
+const currentData = queryClient.getQueryData<{ data: IOrder[] }>([
+  QK.ORDER.LIST
+]);
+const updated = [...currentData.data, response.data]; // ← TypeError
+
+// correct — always guard or invalidate
+if (currentData?.data) {
+  // safe to work with the cache
+} else {
+  void queryClient.invalidateQueries({ queryKey: [QK.ORDER.LIST] });
+}
+```
+
+The `if/else` pattern is used consistently throughout the project. It's not optional—the cache might not be populated at the time the mutation resolves.
+
+### Calling `invalidateQueries` without `void`
+
+`invalidateQueries` returns a `Promise`. Ignoring it without `void` in an async context triggers TypeScript's `no-floating-promises` rule:
+
+```ts
+// flagged by linter
+queryClient.invalidateQueries({ queryKey: [QK.ORDER.LIST] });
+
+// correct
+void queryClient.invalidateQueries({ queryKey: [QK.ORDER.LIST] });
+```
+
+---
+
+## Summary
+
+The patterns in this project form a complete, type-safe data layer:
+
+- **`IApiResponse<T>`** is the universal response envelope—one type covers every endpoint.
+- **`fetcher<T>`** centralizes HTTP logic, headers, error normalization, and timeouts. TypeScript flows from call site to component automatically.
+- **`QK` and `EP`** constants eliminate magic strings and mirror the domain structure.
+- **Zod schemas** (`z.input` / `z.output`) bridge form validation and mutation types—a single schema file serves both React Hook Form and React Query.
+- **`setQueryData`** keeps the UI in sync after mutations without extra requests. `invalidateQueries` is the safety fallback when the cache is cold.
+- **`getQueryData<T>`** requires an explicit generic—otherwise the cache is `unknown` and TypeScript blocks you from doing anything useful with it.
+- **React Query handles server state. Zustand handles client state.** They don't overlap.
+
+The result is a system where TypeScript errors surface at compile time—not at runtime in production—and where every API interaction is traceable from schema definition to cache update.
