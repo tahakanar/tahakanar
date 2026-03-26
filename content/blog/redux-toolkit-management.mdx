@@ -1,0 +1,565 @@
+---
+title: 'Redux Toolkit Done Right: Clean State Management Without Boilerplate'
+date: '2026-03-26'
+description: 'Learn practical Redux Toolkit patterns including slices, RTK Query, custom baseQuery, async thunks, and scalable architecture for clean and maintainable state management.'
+keywords:
+  [
+    'Redux Toolkit tutorial',
+    'Redux Toolkit best practices',
+    'RTK Query guide',
+    'RTK slices example',
+    'Redux async thunk guide',
+    'React state management Redux',
+    'Redux Toolkit architecture',
+    'modern Redux patterns',
+    'Redux Toolkit TypeScript',
+    'global state management React',
+    'RTK Query vs createAsyncThunk',
+    'Redux scalable apps'
+  ]
+---
+
+Redux Toolkit (RTK) is the modern way to use Redux. It removes most of the complexity that made Redux difficult in the past and gives you a structured way to manage state.
+
+If you've avoided Redux because of boilerplate—this is the version you actually want.
+
+## Why Redux Toolkit Exists
+
+Classic Redux required:
+
+- action types
+- action creators
+- reducers
+- immutable updates
+
+That often resulted in 3–4 files just to update one piece of state.
+
+Redux Toolkit simplifies this by:
+
+- combining actions + reducers into slices
+- handling immutability automatically with Immer
+- providing built-in async handling
+- enforcing best practices by default
+
+The result: less code, fewer mistakes, better structure.
+
+## Setting Up a Clean Store
+
+### Basic store setup
+
+```ts
+import { configureStore } from '@reduxjs/toolkit';
+import authReducer from '@/features/auth/authSlice';
+import postsReducer from '@/features/posts/postsSlice';
+
+export const store = configureStore({
+  reducer: {
+    auth: authReducer,
+    posts: postsReducer
+  }
+});
+```
+
+### Factory pattern (recommended for SSR / Next.js)
+
+When you need to pass server-side data (like language, user session) into your store at initialization, use a factory function instead of a direct export:
+
+```ts
+import { configureStore } from '@reduxjs/toolkit';
+import { baseApi } from '@/rtk/base-api';
+import root from './reducers/root';
+import appointmentModal from './reducers/appointment-modal';
+import assistant from '@/features/assistant/Assistant.slice';
+
+export const makeStore = ({ language }: { language: string }) =>
+  configureStore({
+    reducer: {
+      [baseApi.reducerPath]: baseApi.reducer,
+      language: (state: string = language): string => state,
+      root,
+      appointmentModal,
+      assistant
+    },
+    middleware: getDefaultMiddleware =>
+      getDefaultMiddleware().concat(baseApi.middleware),
+    preloadedState: {
+      language
+    }
+  });
+```
+
+`preloadedState` lets you hydrate state from the server—useful for locale, auth tokens, or any server-rendered data.
+
+### Store types
+
+```ts
+// types/store.d.ts
+import { makeStore } from '@/store';
+
+export type AppStore = ReturnType<typeof makeStore>;
+export type RootState = ReturnType<AppStore['getState']>;
+export type AppDispatch = AppStore['dispatch'];
+```
+
+### Typed hooks (modern RTK 2.x API)
+
+RTK 2.x introduced a cleaner way to create typed hooks without `TypedUseSelectorHook`:
+
+```ts
+// store/index.ts
+import { useSelector } from 'react-redux';
+import type { RootState } from '@/types/store';
+
+export const useAppSelector = useSelector.withTypes<RootState>();
+```
+
+> **Older approach** (still valid but verbose):
+>
+> ```ts
+> import { TypedUseSelectorHook, useDispatch, useSelector } from 'react-redux';
+> export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;
+> export const useAppDispatch = () => useDispatch<AppDispatch>();
+> ```
+
+## Writing Slices the Right Way
+
+A slice contains:
+
+- initial state
+- reducers
+- generated actions
+
+### Simple slice
+
+```ts
+import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+
+type AuthState = {
+  user: { id: string; email: string } | null;
+  loading: boolean;
+};
+
+const initialState: AuthState = {
+  user: null,
+  loading: false
+};
+
+const authSlice = createSlice({
+  name: 'auth',
+  initialState,
+  reducers: {
+    setUser(state, action: PayloadAction<AuthState['user']>) {
+      state.user = action.payload;
+    },
+    logout(state) {
+      state.user = null;
+    }
+  }
+});
+
+export const { setUser, logout } = authSlice.actions;
+export default authSlice.reducer;
+```
+
+### Real-world slice with complex state
+
+```ts
+import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { AppointmentModalStep } from '@/types/common';
+
+type AppointmentModalState = {
+  currentStep: AppointmentModalStep;
+  steps: Record<AppointmentModalStep, { data: any }>;
+};
+
+const initialState: AppointmentModalState = {
+  currentStep: AppointmentModalStep.DETAIL,
+  steps: {
+    [AppointmentModalStep.DETAIL]: { data: null }
+  }
+};
+
+const appointmentModalSlice = createSlice({
+  name: 'appointmentModal',
+  initialState,
+  reducers: {
+    resetState() {
+      return initialState; // clean reset pattern
+    },
+    setCurrentStep(state, action: PayloadAction<AppointmentModalStep>) {
+      state.currentStep = action.payload;
+    },
+    setStepData(
+      state,
+      { payload }: PayloadAction<{ step: AppointmentModalStep; data: any }>
+    ) {
+      state.steps[payload.step].data = payload.data;
+    }
+  }
+});
+```
+
+**Why `return initialState` works:** Returning a new value from a reducer replaces the entire state. This is the cleanest way to implement a full reset without manually clearing each field.
+
+### Why this is powerful
+
+- No manual action types
+- No switch statements
+- Mutating syntax (handled safely by Immer)
+
+## Handling Async Logic: createAsyncThunk vs RTK Query
+
+There are two built-in ways to handle async logic in RTK. Choosing the right one matters.
+
+### Option A: createAsyncThunk (one-off async operations)
+
+Use this for async logic that isn't directly tied to a server resource—things like login flows, file uploads, or derived computations.
+
+```ts
+import { createAsyncThunk } from '@reduxjs/toolkit';
+
+export const fetchPosts = createAsyncThunk('posts/fetchPosts', async () => {
+  const res = await fetch('https://api.example.com/posts');
+
+  if (!res.ok) {
+    throw new Error('Failed to fetch posts');
+  }
+
+  return res.json();
+});
+```
+
+Handle the states in your slice:
+
+```ts
+const postsSlice = createSlice({
+  name: 'posts',
+  initialState: { items: [], loading: false, error: null as string | null },
+  reducers: {},
+  extraReducers: builder => {
+    builder
+      .addCase(fetchPosts.pending, state => {
+        state.loading = true;
+      })
+      .addCase(fetchPosts.fulfilled, (state, action) => {
+        state.loading = false;
+        state.items = action.payload;
+      })
+      .addCase(fetchPosts.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error';
+      });
+  }
+});
+```
+
+### Option B: RTK Query (recommended for server data fetching)
+
+RTK Query is the preferred approach for API calls. It handles caching, invalidation, loading states, and refetching automatically—without writing any extra reducer logic.
+
+**Step 1: Create a base API**
+
+```ts
+// rtk/base-api.ts
+import { createApi } from '@reduxjs/toolkit/query/react';
+import { baseQuery } from '@/rtk/base-query';
+
+export const baseApi = createApi({
+  baseQuery,
+  endpoints: () => ({}),
+  tagTypes: ['User', 'Appointment', 'Service', 'Customer']
+});
+```
+
+**Step 2: Write a custom baseQuery (with error handling)**
+
+This is where you centralize authentication headers and error dispatching—instead of repeating it in every thunk:
+
+```ts
+// rtk/base-query.ts
+import {
+  BaseQueryFn,
+  FetchBaseQueryError,
+  fetchBaseQuery
+} from '@reduxjs/toolkit/query/react';
+import type { RootState } from '@/types/store';
+import { setServerError, setValidationError } from '@/store/reducers/root';
+
+const _baseQuery = fetchBaseQuery({
+  baseUrl: '/api/v1',
+  timeout: 10000,
+  prepareHeaders: (headers, { getState }) => {
+    headers.set('Accept', 'application/json');
+    headers.set('Content-Type', 'application/json');
+    headers.set('Language', (getState() as RootState).language);
+    return headers;
+  }
+});
+
+export const baseQuery: BaseQueryFn<any, unknown, FetchBaseQueryError> = async (
+  args,
+  api,
+  extraOptions
+) => {
+  const result = (await _baseQuery(args, api, extraOptions)) as any;
+
+  if (result?.error?.data?.success === false && result.error?.data?.message) {
+    api.dispatch(setServerError(result.error?.data?.message));
+  }
+
+  if (result.error?.data?.error_code === '1042') {
+    api.dispatch(
+      setValidationError({
+        endpoint: args.url,
+        method: args.method,
+        errors: result.error.data.errors
+      })
+    );
+  }
+
+  return result;
+};
+```
+
+**Step 3: Inject endpoints per feature**
+
+Instead of one massive API file, split endpoints across features using `injectEndpoints`:
+
+```ts
+// features/appointments/appointmentApi.ts
+import { baseApi } from '@/rtk/base-api';
+
+const api = baseApi.injectEndpoints({
+  endpoints: builder => ({
+    getAppointments: builder.query<AppointmentsResponse, QueryParams>({
+      query: ({ starting_at, ending_at }) =>
+        `/appointments?starting_at=${starting_at}&ending_at=${ending_at}`,
+      providesTags: ['Appointment']
+    }),
+    createAppointment: builder.mutation({
+      query: data => ({
+        url: '/appointments',
+        method: 'POST',
+        body: data
+      }),
+      invalidatesTags: ['Appointment']
+    }),
+    deleteAppointment: builder.mutation({
+      query: (id: number) => ({
+        url: `/appointments/${id}`,
+        method: 'DELETE'
+      }),
+      invalidatesTags: (result, error) => (error ? [] : ['Appointment'])
+    })
+  })
+});
+
+export const {
+  useGetAppointmentsQuery,
+  useCreateAppointmentMutation,
+  useDeleteAppointmentMutation
+} = api;
+```
+
+**Using it in a component:**
+
+```tsx
+import { useGetAppointmentsQuery } from '@/features/appointments/appointmentApi';
+
+export default function AppointmentsPage() {
+  const { data, isLoading, error } = useGetAppointmentsQuery({
+    starting_at: '2024-01-01',
+    ending_at: '2024-01-31'
+  });
+
+  if (isLoading) return <p>Loading...</p>;
+  if (error) return <p>Error loading appointments</p>;
+
+  return (
+    <div>
+      {data?.items.map(appointment => (
+        <p key={appointment.id}>{appointment.title}</p>
+      ))}
+    </div>
+  );
+}
+```
+
+**`providesTags` / `invalidatesTags`** are the cache control mechanism. When a mutation `invalidatesTags: ["Appointment"]`, any query that `providesTags: ["Appointment"]` automatically re-fetches. Zero manual cache management.
+
+## Organizing Large Apps
+
+### Feature-based structure (recommended)
+
+```
+src/
+  features/
+    auth/
+      authSlice.ts
+    appointments/
+      appointmentApi.ts     ← RTK Query endpoints
+    assistant/
+      Assistant.slice.ts    ← UI state slice
+    checkout/
+      Checkout.slice.ts
+      checkoutApi.ts
+  store/
+    index.ts                ← makeStore, useAppSelector
+    reducers/
+      root.ts               ← global error state
+      appointment-modal.ts  ← multi-step modal state
+  rtk/
+    base-api.ts             ← createApi with tagTypes
+    base-query.ts           ← custom baseQuery
+    index.ts                ← shared enums (endpoints, includes)
+  types/
+    store.d.ts              ← AppStore, RootState, AppDispatch
+```
+
+### Why this works
+
+- Logic grouped by domain
+- API endpoints live next to their feature
+- `store/` only contains shared/global state
+- Easier scaling and less cross-dependency chaos
+
+### Avoid
+
+```
+reducers/
+actions/
+types/
+```
+
+This leads to fragmentation—you need to open 4 files to understand one feature.
+
+## Writing Good Selectors
+
+Selectors isolate state access and prevent duplication.
+
+### Correct: specific selector
+
+```ts
+// appointment-modal.ts
+export const selectCurrentStep = (state: {
+  appointmentModal: AppointmentModalState;
+}) => state.appointmentModal.currentStep;
+
+export const selectDetailStepData = (state: {
+  appointmentModal: AppointmentModalState;
+}) => state.appointmentModal.steps[AppointmentModalStep.DETAIL].data;
+```
+
+### Wrong: returning entire slice state
+
+```ts
+// antipattern — returns everything instead of the needed field
+export const selectPaymentOption = (state: { checkout: CheckoutState }) =>
+  state.checkout; // ← should be state.checkout.paymentOption
+```
+
+This defeats the purpose of selectors. Components re-render on any state change, not just the value they need.
+
+### Use `RootState` for selector types
+
+```ts
+import type { RootState } from '@/types/store';
+
+export const selectUser = (state: RootState) => state.auth.user;
+export const selectCurrentStep = (state: RootState) =>
+  state.appointmentModal.currentStep;
+```
+
+## Common Mistakes
+
+### Overusing Redux
+
+Not everything needs global state.
+
+**Avoid storing:**
+
+- form inputs
+- UI toggles
+- local component state
+
+**Use Redux for:**
+
+- auth state
+- shared server data (or RTK Query)
+- global settings
+
+### Putting too much logic in components
+
+Move logic into:
+
+- slices
+- thunks or RTK Query mutations
+- selectors
+
+### Mutating outside Redux Toolkit
+
+RTK allows mutation inside reducers only.
+
+Outside (in components), always treat state as immutable.
+
+### Not using `invalidatesTags` properly
+
+```ts
+// wrong: always invalidates even on error
+invalidatesTags: ['Appointment'];
+
+// correct: skip invalidation if there's an error
+invalidatesTags: (result, error) => (error ? [] : ['Appointment']);
+```
+
+## When to Use Redux Toolkit vs Other Tools
+
+Redux Toolkit (with RTK Query) is great when:
+
+- you have complex shared state across many components
+- you need a centralized caching layer for API data
+- your app scales beyond simple state patterns
+- you want a single source of truth for server state
+
+### Redux + Zustand together
+
+For some state, lighter tools are better. You can use Zustand alongside Redux without conflict:
+
+```ts
+// store/registerStepperStore.ts — Zustand for isolated multi-step form state
+import { create } from 'zustand';
+
+const useRegisterStepperFormStore = create<FormState>(set => ({
+  currentStep: { id: 'COMPANY_INFO', status: 'ONPROGRESS' },
+  formValues: { company_name: '', tax_number: '', address: '' },
+  setFormValues: ({ data }) =>
+    set(state => ({ formValues: { ...state.formValues, ...data } })),
+  setStateToDefault: () => set(() => ({ ...defaultState }))
+}));
+```
+
+**Rule of thumb:**
+
+- **RTK + RTK Query** → server data, global shared state, complex async
+- **Zustand** → isolated UI flows (multi-step forms, wizards, local modals)
+- **React state / Context** → truly local state, small apps
+
+---
+
+## Final Thoughts
+
+Redux Toolkit—especially with RTK Query—makes Redux practical again.
+
+If you follow a few key principles:
+
+- use slices for global UI state
+- use RTK Query for server data (not `createAsyncThunk`)
+- write a custom `baseQuery` for centralized headers and error handling
+- use `injectEndpoints` to split API logic by feature
+- write specific selectors, not ones that return entire slices
+- use `return initialState` for clean resets
+- coexist with Zustand for isolated local flows
+
+…you'll end up with a system that is both powerful and maintainable.
+
+Redux is no longer about boilerplate—it's about structure and predictability.
