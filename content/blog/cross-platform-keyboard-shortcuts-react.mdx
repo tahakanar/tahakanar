@@ -1,6 +1,6 @@
 ---
 title: 'Handling Mac and Windows Keyboard Shortcuts in React'
-date: '2026-10-15'
+date: '2026-09-03'
 description: 'How to build keyboard shortcuts in a React app that show the right badge and fire the right handler on Mac and Windows — event.code vs event.key, Option producing "å", AZERTY layouts, browser-reserved combos, and how to test both platforms in Jest.'
 keywords:
   [
@@ -27,7 +27,7 @@ Before the refactor, every shortcut lived in two places:
 
 ```tsx
 // In the toolbar
-<Tooltip label="AI assistant" shortcut="⌥A" />
+<Tooltip label='AI assistant' shortcut='⌥A' />
 ```
 
 ```ts
@@ -65,12 +65,18 @@ export interface ShortcutDefinition {
 Here, `mod` means ⌘ on Mac and Ctrl elsewhere. That lets undo and search use the same definition on both platforms.
 
 ```ts
-const alt = (code: string, label: string, windowsLabel = label): ShortcutDefinition => ({
+const alt = (
+  code: string,
+  label: string,
+  windowsLabel = label
+): ShortcutDefinition => ({
   modifiers: ['alt'],
   code,
   label: {
     mac: code.startsWith('Key') ? `${label} (QWERTY position)` : label,
-    windows: code.startsWith('Key') ? `${windowsLabel} (QWERTY position)` : windowsLabel
+    windows: code.startsWith('Key')
+      ? `${windowsLabel} (QWERTY position)`
+      : windowsLabel
   }
 });
 
@@ -78,9 +84,24 @@ export const SHORTCUTS = {
   assistant: alt('KeyA', 'A'),
   share: alt('KeyS', 'S'),
   deleteItem: alt('Backspace', '⌫', 'Backspace'),
-  undo: { modifiers: ['mod'], code: 'KeyZ', key: 'z', label: { mac: 'Z', windows: 'Z' } },
-  redo: { modifiers: ['mod', 'shift'], code: 'KeyZ', key: 'z', label: { mac: 'Z', windows: 'Z' } },
-  search: { modifiers: ['mod'], code: 'KeyK', key: 'k', label: { mac: 'K', windows: 'K' } }
+  undo: {
+    modifiers: ['mod'],
+    code: 'KeyZ',
+    key: 'z',
+    label: { mac: 'Z', windows: 'Z' }
+  },
+  redo: {
+    modifiers: ['mod', 'shift'],
+    code: 'KeyZ',
+    key: 'z',
+    label: { mac: 'Z', windows: 'Z' }
+  },
+  search: {
+    modifiers: ['mod'],
+    code: 'KeyK',
+    key: 'k',
+    label: { mac: 'K', windows: 'K' }
+  }
 } satisfies Record<string, ShortcutDefinition>;
 ```
 
@@ -106,12 +127,19 @@ const WINDOWS_NAMES: Array<[ShortcutModifier, string]> = [
   ['shift', 'Shift']
 ];
 
-export const formatShortcut = (shortcut: ShortcutDefinition, mac = isMacPlatform()) => {
+export const formatShortcut = (
+  shortcut: ShortcutDefinition,
+  mac = isMacPlatform()
+) => {
   if (mac) {
-    const symbols = MAC_SYMBOLS.filter(([m]) => shortcut.modifiers.includes(m)).map(([, s]) => s);
+    const symbols = MAC_SYMBOLS.filter(([m]) =>
+      shortcut.modifiers.includes(m)
+    ).map(([, s]) => s);
     return `${symbols.join('')}${shortcut.label.mac}`;
   }
-  const names = WINDOWS_NAMES.filter(([m]) => shortcut.modifiers.includes(m)).map(([, n]) => n);
+  const names = WINDOWS_NAMES.filter(([m]) =>
+    shortcut.modifiers.includes(m)
+  ).map(([, n]) => n);
   return [...names, shortcut.label.windows].join('+');
 };
 ```
@@ -123,8 +151,9 @@ Detecting the platform:
 ```ts
 export const isMacPlatform = (): boolean => {
   if (typeof navigator === 'undefined') return false;
-  const uaPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
-    .userAgentData?.platform;
+  const uaPlatform = (
+    navigator as Navigator & { userAgentData?: { platform?: string } }
+  ).userAgentData?.platform;
   const source = uaPlatform || navigator.platform || navigator.userAgent || '';
   return /mac|iphone|ipad|ipod/i.test(source);
 };
@@ -155,14 +184,18 @@ For Cmd/Ctrl letter shortcuts, I use `key`. Matching by `code` **or** `key` woul
 
 ```ts
 export const matchesShortcut = (
-  event: Pick<KeyboardEvent, 'code' | 'key' | 'altKey' | 'shiftKey' | 'metaKey' | 'ctrlKey'>,
+  event: Pick<
+    KeyboardEvent,
+    'code' | 'key' | 'altKey' | 'shiftKey' | 'metaKey' | 'ctrlKey'
+  >,
   shortcut: ShortcutDefinition,
   mac = isMacPlatform()
 ): boolean => {
   // Character shortcuts and physical shortcuts have distinct matching rules.
-  const matchesKey = shortcut.key && !shortcut.modifiers.includes('alt')
-    ? event.key.toLowerCase() === shortcut.key
-    : event.code === shortcut.code;
+  const matchesKey =
+    shortcut.key && !shortcut.modifiers.includes('alt')
+      ? event.key.toLowerCase() === shortcut.key
+      : event.code === shortcut.code;
   if (!matchesKey) return false;
 
   // Extra modifiers mean a different shortcut: ⌥A must not fire on ⇧⌥A.
@@ -227,7 +260,7 @@ And the badge:
 ```tsx
 useShortcut(SHORTCUTS.assistant, openAssistant);
 
-<Tooltip label="AI assistant" shortcut={formatShortcut(SHORTCUTS.assistant)} />;
+<Tooltip label='AI assistant' shortcut={formatShortcut(SHORTCUTS.assistant)} />;
 ```
 
 The hook and tooltip now read `SHORTCUTS.assistant`. The Alt label is a little longer because it needs to explain the physical-key choice.
@@ -274,22 +307,50 @@ describe('formatShortcut', () => {
 
 describe('matchesShortcut', () => {
   it('matches ⌥A on Mac even though key is "å"', () => {
-    const event = { code: 'KeyA', key: 'å', altKey: true, shiftKey: false, metaKey: false, ctrlKey: false };
+    const event = {
+      code: 'KeyA',
+      key: 'å',
+      altKey: true,
+      shiftKey: false,
+      metaKey: false,
+      ctrlKey: false
+    };
     expect(matchesShortcut(event, SHORTCUTS.assistant, true)).toBe(true);
   });
 
   it('matches ⌘Z on AZERTY where code is KeyW', () => {
-    const event = { code: 'KeyW', key: 'z', altKey: false, shiftKey: false, metaKey: true, ctrlKey: false };
+    const event = {
+      code: 'KeyW',
+      key: 'z',
+      altKey: false,
+      shiftKey: false,
+      metaKey: true,
+      ctrlKey: false
+    };
     expect(matchesShortcut(event, SHORTCUTS.undo, true)).toBe(true);
   });
 
   it('does not match the QWERTY Z position when its character is different', () => {
-    const event = { code: 'KeyZ', key: 'w', altKey: false, shiftKey: false, metaKey: true, ctrlKey: false };
+    const event = {
+      code: 'KeyZ',
+      key: 'w',
+      altKey: false,
+      shiftKey: false,
+      metaKey: true,
+      ctrlKey: false
+    };
     expect(matchesShortcut(event, SHORTCUTS.undo, true)).toBe(false);
   });
 
   it('does not fire undo on redo', () => {
-    const event = { code: 'KeyZ', key: 'z', altKey: false, shiftKey: true, metaKey: true, ctrlKey: false };
+    const event = {
+      code: 'KeyZ',
+      key: 'z',
+      altKey: false,
+      shiftKey: true,
+      metaKey: true,
+      ctrlKey: false
+    };
     expect(matchesShortcut(event, SHORTCUTS.undo, true)).toBe(false);
   });
 });
