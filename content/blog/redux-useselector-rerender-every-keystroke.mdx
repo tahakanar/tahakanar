@@ -1,0 +1,275 @@
+---
+title: 'Reducing Sidebar Re-Renders in a Redux Document Editor'
+date: '2026-08-20'
+description: 'How I reduced sidebar row renders from 10.5 to 1.05 per keystroke by narrowing Redux selectors and stabilizing component props.'
+keywords:
+  [
+    'Redux useSelector performance',
+    'React re-render every keystroke',
+    'Redux selector best practices',
+    'React.memo stable callbacks',
+    'Redux Toolkit performance',
+    'useSelector reference equality',
+    'React render optimization',
+    'latest ref pattern React',
+    'measure React re-renders',
+    'React performance testing'
+  ]
+---
+
+In my [Redux Toolkit post](/blog/redux-toolkit-management) I wrote one line about selectors that return a whole slice: _"Components re-render on any state change, not just the value they need."_
+
+More precisely, those components update when the selected slice changes. I ran into this in a document editor: typing in one item caused the sidebar rows, categories, and page root to re-render. Narrowing the row selectors helped, but the parent components and their props needed attention too.
+
+## The symptom
+
+The screen is a document editor with two parts:
+
+- a sidebar tree on the left — categories, and under each category a list of item rows
+- an editor on the right where you type the content of the active item
+
+Typing felt slightly sticky. Nothing dramatic, just a little lag on longer documents. When I turned on **"Highlight updates when components render"** in React DevTools, the entire sidebar flashed on every single key press.
+
+## Why it happened
+
+Every keystroke dispatched an action that updated the active item's text:
+
+```ts
+// editorSlice.ts
+setActiveItem(state, action: PayloadAction<Partial<ActiveItem>>) {
+  state.activeItem = { ...state.activeItem, ...action.payload };
+}
+```
+
+And every sidebar row subscribed like this:
+
+```tsx
+const CategoryItem = ({ item }: Props) => {
+  const editor = useSelector((state: RootState) => state.editor);
+  const isActive = editor.activeItem.id === item.id;
+  // ...
+};
+```
+
+Here's the part that's easy to forget: `useSelector` re-renders the component when the value the selector returns is **not reference-equal** to the previous one (`===`). Immer gives you structural sharing, so when `state.editor.activeItem` changes, the `state.editor` object is also a brand-new reference.
+
+Each row only needed to know whether it was active, but it received a new `editor` reference on every keystroke. That affected every row in every open category.
+
+It wasn't only the rows either. I found the same pattern in:
+
+- the category component that renders the rows
+- two hooks called at the **page root** (sync and subscription logic) — which meant the whole page re-rendered on every key
+- the hook that drives the sidebar content
+
+The page-level hooks were easy to overlook because they contained no JSX. Their subscriptions still caused the page component to re-render.
+
+## What I measured
+
+Before changing anything I added temporary render counters — a `useRef` counter in each suspicious component, logged on commit — and typed 20 characters, three times, on a document with 10 visible items in 3 categories.
+
+Per keystroke, before → after:
+
+- **Sidebar row renders:** 10.5 → 1.05
+- **Category renders:** 3.15 → 0
+- **Page and sidebar container:** every keystroke → 0
+- **Dispatch → commit (median):** ~20ms → ~8ms
+
+These are measurements from this editor and the workload above, not a general Redux benchmark. The 10× figure refers to sidebar row renders (10.5 / 1.05), not a 10× reduction in elapsed time. Raw profiler traces are not included in this post.
+
+I removed the temporary counters before merging.
+
+## Narrowing the row selectors
+
+The row doesn't need the editor state. It needs two things: _am I the active row?_ and, only if so, _what's the live text?_
+
+```tsx
+const isActive = useSelector(
+  (state: RootState) => state.editor.activeItem.id === item.id
+);
+
+const activeText = useSelector((state: RootState) =>
+  state.editor.activeItem.id === item.id
+    ? state.editor.activeItem.text
+    : undefined
+);
+
+const text = isActive ? activeText : item.text;
+```
+
+Both selectors return primitives. For 9 of the 10 rows, `isActive` stays `false` and `activeText` stays `undefined` no matter how much you type, so `useSelector` has no reason to re-render them.
+
+The second selector is the trick worth remembering: **return `undefined` for rows that don't own the value**. The row-specific data only changes for the row that actually holds it.
+
+The same idea works at the category level:
+
+```tsx
+// Only the category that holds the new draft gets it back.
+const draftHere = useSelector((state: RootState) => {
+  const active = state.editor.activeItem;
+  return active.isNew && active.categoryId === category.id ? active : null;
+});
+
+const isOpen = useSelector((state: RootState) =>
+  state.editor.openCategories.includes(category.id)
+);
+```
+
+## Parent renders still reached the rows
+
+After narrowing the selectors, I measured again. The category component was still rendering its rows, so I wrapped the row component in `memo`.
+
+```tsx
+export const CategoryItem = memo(function CategoryItem({
+  item,
+  onAddItem
+}: Props) {
+  // ...
+});
+```
+
+Narrow selectors stop a component from re-rendering **because of the store**. `memo` stops it from re-rendering **because of its parent**. You usually need both.
+
+## Keeping the callback prop stable
+
+`memo` compares props shallowly. The category was passing this:
+
+```tsx
+<CategoryItem item={child} onAddItem={() => handleAddNewItem(true)} />
+```
+
+That's a new function on every render, so `memo` sees a changed prop and re-renders anyway.
+
+The obvious fix is `useCallback`, but `handleAddNewItem` reads a lot of changing state, so its dependency list would change all the time. What I want is a callback whose **identity** never changes but which always calls the **latest** version of the handler. That's the "latest ref" pattern:
+
+```ts
+// useLatestRef.ts
+import { useLayoutEffect, useRef } from 'react';
+
+export function useLatestRef<T>(value: T) {
+  const ref = useRef(value);
+  useLayoutEffect(() => {
+    ref.current = value;
+  });
+  return ref;
+}
+```
+
+```tsx
+const handleAddNewItemRef = useLatestRef(handleAddNewItem);
+
+const handleAddItemFocused = useCallback(
+  () => handleAddNewItemRef.current(true),
+  []
+);
+
+<CategoryItem item={child} onAddItem={handleAddItemFocused} />;
+```
+
+The callback is created once, and when it runs it reads whatever the newest handler is. It's safe because it's only called from event handlers, never during render.
+
+## The subscriptions at the page root
+
+The hooks at the page root were reading the whole slice just to grab an id and a status:
+
+```ts
+// Before
+const editor = useSelector((state: RootState) => state.editor);
+useEffect(() => {
+  /* uses editor.document.id and editor.document.status */
+}, [editor]);
+```
+
+```ts
+// After
+const documentId = useSelector((state: RootState) => state.editor.document.id);
+const status = useSelector((state: RootState) => state.editor.document.status);
+useEffect(() => {
+  /* ... */
+}, [documentId, status]);
+```
+
+Same behavior, but now typing doesn't touch them, and the whole page stopped re-rendering per key.
+
+## A bug hiding inside the perf problem
+
+While narrowing one of the components I found this:
+
+```ts
+const debouncedSave = useCallback(
+  debounce((name: string) => saveCategoryName(name), 800),
+  [user, editor] // ← `editor` changes on every keystroke
+);
+```
+
+Because `editor` changed on every key, the debounced function was **recreated** on every key. A fresh `debounce` has a fresh timer, so the debounce never really debounced anything. Narrowing the dependencies to primitives (`[userId, documentId]`) fixed the performance _and_ the actual behavior.
+
+In this case, the broad dependency also kept replacing a function that needed to retain its timer between calls.
+
+## Checking which rows render
+
+Performance fixes regress silently, because nothing fails when someone writes `useSelector(s => s.editor)` again. So I wrote a test that counts renders against a **real** store. No mocked `useSelector`, since the whole point is the subscription behavior.
+
+```tsx
+import { configureStore } from '@reduxjs/toolkit';
+import { Provider } from 'react-redux';
+import { act, render } from '@testing-library/react';
+
+const renderSpy = jest.fn();
+jest.mock('../row-content', () => ({
+  RowContent: ({ id }: { id: string }) => {
+    renderSpy(id);
+    return null;
+  }
+}));
+
+it('only re-renders the active row while typing', () => {
+  const store = configureStore({ reducer: { editor: editorReducer } });
+  render(
+    <Provider store={store}>
+      {items.map(item => (
+        <CategoryItem key={item.id} item={item} />
+      ))}
+    </Provider>
+  );
+
+  act(() => store.dispatch(setActiveItem({ id: 'a' })));
+  renderSpy.mockClear();
+
+  act(() => store.dispatch(setActiveItem({ text: 'h' })));
+  act(() => store.dispatch(setActiveItem({ text: 'he' })));
+
+  expect(renderSpy).toHaveBeenCalledWith('a');
+  expect(renderSpy.mock.calls.every(([id]) => id === 'a')).toBe(true);
+});
+```
+
+I added two more tests: switching the active item re-renders only the old and new active rows, and re-rendering the parent with the same props doesn't re-render the rows. That last one is the guard for `memo` and the stable callback.
+
+All three tests fail on the old code.
+
+## A few things to check in a similar editor
+
+### Returning new objects or arrays from a selector
+
+```ts
+// re-renders on every store update, even unrelated ones
+const visible = useSelector((s: RootState) =>
+  s.editor.items.filter(i => !i.hidden)
+);
+```
+
+`filter` returns a new array every time. Use `createSelector` to memoize derived data, or select the raw array and derive with `useMemo`.
+
+### Fixing selectors but not the parent
+
+If the parent still re-renders, a non-memoized child re-renders too. Check the component _above_ the one you're optimizing.
+
+### `memo` with inline callbacks
+
+An inline callback passed as a prop changes on each parent render, so it prevents `memo` from skipping that render. Check the props at the call site as well as the memoized component.
+
+### Optimizing without measuring
+
+I'd have guessed the rows were the problem. The page root re-rendering on every key was something I only saw because I counted.
+
+The row selectors were where I started, but the page-level subscriptions explained more of the rendering than I expected. If I were checking another editor, I would count renders at both levels before changing anything. In this one, narrowing those subscriptions and keeping the row props stable brought sidebar row renders down from 10.5 to 1.05 per keystroke.

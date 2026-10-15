@@ -1,0 +1,300 @@
+---
+title: 'Handling Mac and Windows Keyboard Shortcuts in React'
+date: '2026-10-15'
+description: 'How to build keyboard shortcuts in a React app that show the right badge and fire the right handler on Mac and Windows — event.code vs event.key, Option producing "å", AZERTY layouts, browser-reserved combos, and how to test both platforms in Jest.'
+keywords:
+  [
+    'keyboard shortcuts React',
+    'cross-platform keyboard shortcuts',
+    'event.code vs event.key',
+    'Mac Option key å',
+    'Cmd vs Ctrl shortcut',
+    'KeyboardEvent JavaScript',
+    'AZERTY keyboard shortcuts',
+    'browser reserved shortcuts',
+    'TypeScript shortcut registry',
+    'test navigator.platform Jest'
+  ]
+---
+
+The dashboard had Mac shortcut symbols hardcoded into its tooltips. The listeners lived elsewhere, so checking whether a label was right meant finding the handler and comparing the two. Windows users got the same Mac labels.
+
+I moved both into a shared registry. That cleaned up the duplication, but keyboard layouts needed a separate decision: should a shortcut follow the letter printed on the key, or its physical position?
+
+## The original problem: two sources of truth
+
+Before the refactor, every shortcut lived in two places:
+
+```tsx
+// In the toolbar
+<Tooltip label="AI assistant" shortcut="⌥A" />
+```
+
+```ts
+// Somewhere else entirely
+window.addEventListener('keydown', event => {
+  if (event.altKey && event.code === 'KeyA') openAssistant();
+});
+```
+
+There were a few things to untangle:
+
+1. **Wrong badge on Windows.** `Alt+A` and `Ctrl+Z` are more useful labels on Windows than Mac modifier symbols.
+2. **Drift.** Someone changes the listener and forgets the badge, or the other way round. The badge now advertises a shortcut that does nothing.
+3. **Dead badges.** I found a tooltip advertising `⇧⌘T`. There was no handler for it, and even if there had been, the browser would never have sent it to the page (more on that below).
+
+## One definition per shortcut
+
+The fix is a small registry where each shortcut is described once:
+
+```ts
+// lib/shortcuts.ts
+export type ShortcutModifier = 'alt' | 'mod' | 'shift';
+
+export interface ShortcutDefinition {
+  modifiers: ShortcutModifier[];
+  /** Physical key position (KeyboardEvent.code). Layout-independent. */
+  code: string;
+  /** Printed character to match instead of code (KeyboardEvent.key, lowercase). */
+  key?: string;
+  /** What the badge shows for the main key on each platform. */
+  label: { mac: string; windows: string };
+}
+```
+
+Here, `mod` means ⌘ on Mac and Ctrl elsewhere. That lets undo and search use the same definition on both platforms.
+
+```ts
+const alt = (code: string, label: string, windowsLabel = label): ShortcutDefinition => ({
+  modifiers: ['alt'],
+  code,
+  label: {
+    mac: code.startsWith('Key') ? `${label} (QWERTY position)` : label,
+    windows: code.startsWith('Key') ? `${windowsLabel} (QWERTY position)` : windowsLabel
+  }
+});
+
+export const SHORTCUTS = {
+  assistant: alt('KeyA', 'A'),
+  share: alt('KeyS', 'S'),
+  deleteItem: alt('Backspace', '⌫', 'Backspace'),
+  undo: { modifiers: ['mod'], code: 'KeyZ', key: 'z', label: { mac: 'Z', windows: 'Z' } },
+  redo: { modifiers: ['mod', 'shift'], code: 'KeyZ', key: 'z', label: { mac: 'Z', windows: 'Z' } },
+  search: { modifiers: ['mod'], code: 'KeyK', key: 'k', label: { mac: 'K', windows: 'K' } }
+} satisfies Record<string, ShortcutDefinition>;
+```
+
+`satisfies` keeps the exact keys of the object (so `SHORTCUTS.undo` autocompletes) while still checking every entry against the type.
+
+## Formatting the badge
+
+Mac and Windows don't just use different symbols. They have different **conventions**:
+
+- Mac: symbols, no separator, Apple's order `⌃ ⌥ ⇧ ⌘` → `⇧⌘Z`
+- Windows: names, `+` separator, `Ctrl, Alt, Shift` order → `Ctrl+Shift+Z`
+
+```ts
+const MAC_SYMBOLS: Array<[ShortcutModifier, string]> = [
+  ['alt', '⌥'],
+  ['shift', '⇧'],
+  ['mod', '⌘']
+];
+
+const WINDOWS_NAMES: Array<[ShortcutModifier, string]> = [
+  ['mod', 'Ctrl'],
+  ['alt', 'Alt'],
+  ['shift', 'Shift']
+];
+
+export const formatShortcut = (shortcut: ShortcutDefinition, mac = isMacPlatform()) => {
+  if (mac) {
+    const symbols = MAC_SYMBOLS.filter(([m]) => shortcut.modifiers.includes(m)).map(([, s]) => s);
+    return `${symbols.join('')}${shortcut.label.mac}`;
+  }
+  const names = WINDOWS_NAMES.filter(([m]) => shortcut.modifiers.includes(m)).map(([, n]) => n);
+  return [...names, shortcut.label.windows].join('+');
+};
+```
+
+The order comes from the constant arrays, not from the definition. That way `['shift', 'mod']` and `['mod', 'shift']` both render as `⇧⌘Z`.
+
+Detecting the platform:
+
+```ts
+export const isMacPlatform = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const uaPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+    .userAgentData?.platform;
+  const source = uaPlatform || navigator.platform || navigator.userAgent || '';
+  return /mac|iphone|ipad|ipod/i.test(source);
+};
+```
+
+`navigator.platform` is deprecated but still everywhere. `userAgentData` is the modern replacement but only exists in Chromium. Check both and fall back to the user agent.
+
+## Matching the event: `code` vs `key`
+
+Changing the badge is straightforward. Matching the key takes a little more care.
+
+- `event.key` is the **character produced** — what the user sees.
+- `event.code` is the **physical key** — where it sits on a US layout.
+
+Neither one is right in every case.
+
+### Option/Alt breaks `key` on Mac
+
+On a Mac, `⌥A` doesn't produce `"a"`. It produces `"å"`. `⌥S` is `"ß"`, `⌥E` is a dead key for accents. If you match Alt shortcuts by `key`, they simply never fire on a Mac.
+
+I kept Alt shortcuts tied to `code`. This chooses a physical position, not the printed letter. On AZERTY, `KeyA` is labeled Q, so the badge explicitly says `A (QWERTY position)`. For layout-native badges, resolve the physical code through a supported keyboard layout API and retain an explicit fallback. A platform check alone cannot determine the keyboard layout. See [MDN on `KeyboardEvent.code`](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/code).
+
+### Layouts break `code` for Cmd/Ctrl shortcuts
+
+On a French AZERTY keyboard, the key labeled **Z** sits where the US **W** is, so its `code` is `"KeyW"`. A user pressing ⌘Z — on the key that says Z — sends `code: "KeyW"`. Match undo by `code` alone and it's broken for every AZERTY user.
+
+For Cmd/Ctrl letter shortcuts, I use `key`. Matching by `code` **or** `key` would also accept a different printed letter at the QWERTY position, potentially colliding with another shortcut. Use `code` only for definitions that intentionally identify a physical key.
+
+```ts
+export const matchesShortcut = (
+  event: Pick<KeyboardEvent, 'code' | 'key' | 'altKey' | 'shiftKey' | 'metaKey' | 'ctrlKey'>,
+  shortcut: ShortcutDefinition,
+  mac = isMacPlatform()
+): boolean => {
+  // Character shortcuts and physical shortcuts have distinct matching rules.
+  const matchesKey = shortcut.key && !shortcut.modifiers.includes('alt')
+    ? event.key.toLowerCase() === shortcut.key
+    : event.code === shortcut.code;
+  if (!matchesKey) return false;
+
+  // Extra modifiers mean a different shortcut: ⌥A must not fire on ⇧⌥A.
+  if (event.altKey !== shortcut.modifiers.includes('alt')) return false;
+  if (event.shiftKey !== shortcut.modifiers.includes('shift')) return false;
+
+  const modPressed = mac ? event.metaKey : event.ctrlKey;
+  const otherPressed = mac ? event.ctrlKey : event.metaKey;
+  if (modPressed !== shortcut.modifiers.includes('mod')) return false;
+  if (otherPressed) return false;
+
+  return true;
+};
+```
+
+Two details that are easy to miss:
+
+- **Exact modifier match.** Without the `!==` checks, `undo` (⌘Z) would also fire on `redo` (⇧⌘Z), and you'd undo and redo in the same key press.
+- **The "other" key.** On a Mac, Ctrl+Z is not undo. On Windows, Win+Z is not undo. If the non-`mod` key is held, bail out.
+
+## Be quiet inside text fields
+
+A global ⌘Z handler that runs while the user is typing in a textarea will fight the browser's own text undo. A global ⌥E handler will eat the accent the user was trying to type.
+
+```ts
+export const isEditableTarget = (target: EventTarget | null): boolean => {
+  const el = target as HTMLElement | null;
+  if (!el || typeof el.tagName !== 'string') return false;
+  return (
+    el.tagName === 'INPUT' ||
+    el.tagName === 'TEXTAREA' ||
+    el.tagName === 'SELECT' ||
+    el.isContentEditable === true ||
+    el.getAttribute?.('contenteditable') === 'true'
+  );
+};
+```
+
+The `getAttribute` fallback is there because `isContentEditable` isn't implemented in jsdom. Without it, the tests and the browser disagree.
+
+Putting it together in a hook. `useLatestRef` keeps the newest handler in a ref so the listener doesn't have to be re-attached on every render. I explained that pattern in [the Redux re-render post](/blog/redux-useselector-rerender-every-keystroke).
+
+```ts
+export function useShortcut(shortcut: ShortcutDefinition, handler: () => void) {
+  const handlerRef = useLatestRef(handler);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+      if (!matchesShortcut(event, shortcut)) return;
+      event.preventDefault();
+      handlerRef.current();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [shortcut, handlerRef]);
+}
+```
+
+And the badge:
+
+```tsx
+useShortcut(SHORTCUTS.assistant, openAssistant);
+
+<Tooltip label="AI assistant" shortcut={formatShortcut(SHORTCUTS.assistant)} />;
+```
+
+The hook and tooltip now read `SHORTCUTS.assistant`. The Alt label is a little longer because it needs to explain the physical-key choice.
+
+## Don't pick combos the browser keeps for itself
+
+Some shortcuts never reach your page, whatever you do with `preventDefault`:
+
+- `⌘T` / `Ctrl+T` — new tab
+- `⌘W` / `Ctrl+W` — close tab
+- `⌘N` / `Ctrl+N` — new window
+- `⇧⌘T` / `Ctrl+Shift+T` — reopen closed tab
+
+The browser handles them before the page sees a `keydown`. That `⇧⌘T` badge I mentioned earlier could never have worked.
+
+The `⌥`/`Alt` + letter family is a much safer place for app shortcuts. It's not perfect either: in Firefox on Windows, Alt+letter can open the menu bar (Alt+F is the File menu). So check your exact combos on a real Windows machine, not only on your Mac.
+
+## Testing both platforms
+
+jsdom's default `navigator.platform` is an empty string, so your tests run as "not Mac" by default. If you hardcode `expect(badge).toBe('⌥A (QWERTY position)')`, you're testing a platform your CI isn't pretending to be.
+
+Make the platform explicit and cover both:
+
+```ts
+const setPlatform = (platform: string) =>
+  Object.defineProperty(window.navigator, 'platform', {
+    value: platform,
+    configurable: true
+  });
+
+describe('formatShortcut', () => {
+  it('uses symbols on Mac', () => {
+    setPlatform('MacIntel');
+    expect(formatShortcut(SHORTCUTS.assistant)).toBe('⌥A (QWERTY position)');
+    expect(formatShortcut(SHORTCUTS.redo)).toBe('⇧⌘Z');
+  });
+
+  it('uses names on Windows', () => {
+    setPlatform('Win32');
+    expect(formatShortcut(SHORTCUTS.assistant)).toBe('Alt+A (QWERTY position)');
+    expect(formatShortcut(SHORTCUTS.redo)).toBe('Ctrl+Shift+Z');
+  });
+});
+
+describe('matchesShortcut', () => {
+  it('matches ⌥A on Mac even though key is "å"', () => {
+    const event = { code: 'KeyA', key: 'å', altKey: true, shiftKey: false, metaKey: false, ctrlKey: false };
+    expect(matchesShortcut(event, SHORTCUTS.assistant, true)).toBe(true);
+  });
+
+  it('matches ⌘Z on AZERTY where code is KeyW', () => {
+    const event = { code: 'KeyW', key: 'z', altKey: false, shiftKey: false, metaKey: true, ctrlKey: false };
+    expect(matchesShortcut(event, SHORTCUTS.undo, true)).toBe(true);
+  });
+
+  it('does not match the QWERTY Z position when its character is different', () => {
+    const event = { code: 'KeyZ', key: 'w', altKey: false, shiftKey: false, metaKey: true, ctrlKey: false };
+    expect(matchesShortcut(event, SHORTCUTS.undo, true)).toBe(false);
+  });
+
+  it('does not fire undo on redo', () => {
+    const event = { code: 'KeyZ', key: 'z', altKey: false, shiftKey: true, metaKey: true, ctrlKey: false };
+    expect(matchesShortcut(event, SHORTCUTS.undo, true)).toBe(false);
+  });
+});
+```
+
+Passing `mac` as an explicit argument (with `isMacPlatform()` as the default) lets these tests check matching without changing browser globals.
+
+The registry handles the part I wanted to stop maintaining by hand: keeping labels and listeners in sync. It still needs browser testing. In particular, I would check Alt combinations and non-QWERTY layouts before adding more shortcuts; passing a synthetic keyboard event to a unit test cannot tell you whether the browser will deliver that event.

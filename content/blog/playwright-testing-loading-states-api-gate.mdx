@@ -1,0 +1,285 @@
+---
+title: 'Testing Loading States in Playwright: The API Gate Pattern'
+date: '2026-10-15'
+description: 'Using a promise to keep a delete request pending in Playwright while checking the spinner, disabled buttons, and modal behavior.'
+keywords:
+  [
+    'Playwright loading state test',
+    'Playwright page.route',
+    'test spinner Playwright',
+    'Playwright mock API response',
+    'delay API response Playwright',
+    'E2E race condition testing',
+    'Playwright disabled button test',
+    'deterministic E2E tests',
+    'Playwright route.fulfill',
+    'flaky E2E tests'
+  ]
+---
+
+I was testing a delete modal that could close on Escape while its request was still running. The deletion continued, but the dialog was gone. A success toast would appear afterward, even though closing the dialog looked like cancelling the action.
+
+To test that reliably, I needed to keep the request pending long enough to press Escape and inspect the modal. A fast API response made that awkward. Holding the request behind a promise gave the test control over when it could finish.
+
+## Why a delay was awkward
+
+### Checking immediately after the click
+
+```ts
+await page.click('button:has-text("Delete")');
+await expect(page.locator('.spinner')).toBeVisible();
+```
+
+If the response arrives before the assertion observes the spinner, this fails even when the UI works. The result depends on timing outside the test.
+
+### Add a fixed delay to the route
+
+```ts
+await page.route('**/templates/*', async route => {
+  await new Promise(r => setTimeout(r, 2000));
+  await route.continue();
+});
+```
+
+Better, but now you're guessing. Too short and the assertion races the response again. Too long and every test pays two seconds. And you still can't control **when** the response arrives relative to what the test is doing, which is the whole point when you're testing races.
+
+## The API gate
+
+Instead of a timer, hold the response behind a promise that **the test** resolves:
+
+```ts
+let release!: () => void;
+const gate = new Promise<void>(resolve => (release = resolve));
+
+await page.route('**/templates/*', async route => {
+  if (route.request().method() === 'DELETE') {
+    await gate; // ← the request hangs here until the test says so
+    await route.continue();
+    return;
+  }
+  await route.continue();
+});
+```
+
+Now the test reads like a script:
+
+```ts
+await page.getByRole('button', { name: 'Delete' }).click();
+
+// While the request is held open:
+await expect(dialog.locator('.animate-spin')).toBeVisible();
+await expect(dialog.getByRole('button', { name: 'Delete' })).toBeDisabled();
+await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+release(); // let the response through
+
+await expect(dialog).toBeHidden();
+await expect(page.getByText('Template deleted')).toBeVisible();
+```
+
+The request stays pending through all three assertions. Only then does the test release it.
+
+This is the same idea as the `deferred` helper from my [request deduplication post](/blog/deduplicating-in-flight-requests-session-safe), applied to the network instead of a mocked function: **you** decide when the answer arrives.
+
+## Make it reusable: a mock installer with per-test behavior
+
+Copying route handlers into every test gets old fast. What I do now is write one `installMocks` function per feature. The read endpoints get fixed data, and the endpoint under test gets a **behavior** that each test supplies:
+
+```ts
+interface DeleteBehavior {
+  status: number;
+  /** If set, the DELETE response waits until this promise resolves. */
+  gate?: Promise<void>;
+}
+
+async function installMocks(page: Page, deleteBehavior: () => DeleteBehavior) {
+  await page.route('**/templates**', async route => {
+    const req = route.request();
+
+    if (req.method() === 'DELETE') {
+      const behavior = deleteBehavior();
+      if (behavior.gate) await behavior.gate;
+      await route.fulfill({
+        status: behavior.status,
+        contentType: 'application/json',
+        body: JSON.stringify(
+          behavior.status === 200
+            ? { success: true }
+            : { success: false, error: { message: 'Cannot delete while in use' } }
+        )
+      });
+      return;
+    }
+
+    if (req.method() === 'GET') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: MOCK_LIST })
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+}
+```
+
+Each test then states only what's different about it:
+
+```ts
+test('success: toast + card removed', async ({ page }) => {
+  await installMocks(page, () => ({ status: 200 }));
+  // ...
+});
+
+test('backend refuses: error toast + card stays', async ({ page }) => {
+  await installMocks(page, () => ({ status: 400 }));
+  // ...
+});
+
+test('loading: spinner + disabled buttons', async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(r => (release = r));
+  await installMocks(page, () => ({ status: 200, gate }));
+  // ...
+});
+```
+
+A few details in the installer are worth calling out:
+
+- **`route.fulfill` instead of `route.continue`.** For a delete test I don't want to actually delete things on a shared test environment. Fulfilling makes the test deterministic _and_ harmless. Use `continue` only when you specifically need the real backend.
+- **`route.fallback()` for everything else.** If the glob catches a request you didn't plan for, it falls through to other handlers or the network instead of hanging forever.
+- **A function, not a value.** `deleteBehavior` is called per request, so a test can change behavior halfway through (first delete fails, second succeeds).
+- **Install before `page.goto`.** Routes only apply to requests made after they're registered. If the page loads its list before your route exists, you're testing the real API by accident.
+
+## Checking the modal while deletion is pending
+
+The same setup lets me check more than the spinner. I can press Escape, try a second click, or return an error after the UI has entered its loading state.
+
+### Escape during an in-flight delete
+
+The bug I was chasing: pressing Escape while a delete was in flight closed the modal. The request kept going, and a second later a toast appeared for a dialog the user thought they had cancelled.
+
+```ts
+test('Escape during in-flight delete does not close the modal', async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(r => (release = r));
+  await installMocks(page, () => ({ status: 200, gate }));
+  await page.goto(PAGE_URL);
+
+  await openDeleteModal(page, 'Template A');
+  await page.getByTestId('delete-confirm').click();
+  await expect(page.getByTestId('delete-spinner')).toBeVisible();
+
+  await page.keyboard.press('Escape');
+
+  // Nothing should happen while the request is pending.
+  await page.waitForTimeout(400);
+  await expect(page.getByTestId('delete-modal')).toBeVisible();
+  await expect(page.getByText(/deleted/i)).toHaveCount(0);
+
+  // When it finishes: exactly one correct toast, then the modal closes.
+  release();
+  const successToast = page.getByText('Template deleted', { exact: true });
+  await expect(successToast).toHaveCount(1);
+  await expect(successToast).toBeVisible();
+  await expect(page.getByTestId('delete-modal')).toBeHidden();
+});
+```
+
+This `waitForTimeout(400)` is a bounded observation window, not a deterministic guarantee. Playwright can wait for absence with `toBeHidden()` or `toHaveCount(0)`, but those assertions do not prove that a condition stayed unchanged throughout an interval. Here we check the state after a short delay while the response remains gated; a later regression could still escape this check. Prefer an observable completion signal for the Escape handling or controlled time if the application uses a known timer. [Playwright discourages fixed waits in production tests](https://playwright.dev/docs/api/class-page#page-wait-for-timeout).
+
+### Double submit
+
+```ts
+test('double-click sends one request', async ({ page }) => {
+  let deleteCalls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(r => (release = r));
+
+  await installMocks(page, () => {
+    deleteCalls += 1;
+    return { status: 200, gate };
+  });
+  await page.goto(PAGE_URL);
+
+  await openDeleteModal(page, 'Template A');
+  await page.getByTestId('delete-confirm').dblclick();
+
+  release();
+  await expect(page.getByTestId('delete-modal')).toBeHidden();
+  expect(deleteCalls).toBe(1);
+});
+```
+
+Without the gate, the first request might finish before the second click lands, and the test would pass even though the button never disabled. With the gate, both clicks are guaranteed to happen while the first request is pending. That's the only situation where the bug can show up.
+
+### Errors after a delay
+
+Combine a gate with a failing status to test what happens when the request **eventually** fails:
+
+```ts
+await installMocks(page, () => ({ status: 400, gate }));
+// click → spinner + disabled
+release();
+// error toast, card still in the list, buttons enabled again
+```
+
+This catches a classic: the UI removes the item optimistically, and when the error comes back it shows a toast but never puts the item back.
+
+## Pitfalls
+
+### A forgotten `release()` hangs until timeout
+
+If an assertion fails before `release()` runs, the route handler is still waiting on the gate when the test ends. Playwright tears the page down and moves on, but you get a slow failure and sometimes a noisy "route handler" error in the output.
+
+Release in a `finally` so a failed assertion does not leave the handler waiting:
+
+```ts
+try {
+  // ...assertions while gated...
+} finally {
+  release();
+}
+```
+
+### Glob patterns and query strings
+
+`**/templates/*` does **not** match `/templates?offset=0&limit=20`. When in doubt, use `**/templates**` and branch on `route.request().method()` and `url()` inside the handler. That's what the installer above does.
+
+### Leftover routes inside a single test
+
+The `page` fixture is fresh for each test, so routes don't leak **between** tests. Inside one test, though, if you install a gated route and later want real behavior, remove it explicitly with `page.unroute(...)`, or `page.unrouteAll({ behavior: 'ignoreErrors' })` to drop everything including handlers still waiting on a gate.
+
+### Asserting on the wrong element
+
+While a request is gated, the modal and the page both exist, and both might contain a "Delete" button. Scope your locators to the dialog (`dialog.getByRole(...)`) or use test ids, or you'll end up asserting that the wrong button is disabled.
+
+## The same idea in unit tests
+
+The gate isn't specific to Playwright. In a React Testing Library test with a mocked service, it's the same promise:
+
+```ts
+let release!: () => void;
+deleteTemplate.mockImplementation(() => new Promise(r => (release = () => r({ success: true }))));
+
+await user.click(screen.getByRole('button', { name: 'Delete' }));
+expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled();
+
+await act(async () => release());
+expect(await screen.findByText('Template deleted')).toBeInTheDocument();
+```
+
+Unit tests check the component's logic quickly. The Playwright version checks that the real browser, the real network layer and the real dialog library all behave together. I like having both for anything destructive.
+
+For this delete flow, these are the checks I want covered:
+
+- spinner visible while pending
+- confirm **and** cancel disabled while pending
+- Escape / outside click doesn't close mid-request
+- double-click sends one request
+- delayed error leaves the UI consistent
+- success shows exactly one toast
+
+The gate removes the need to guess an API response delay. The Escape example still uses a bounded fixed wait, with the limitation described above.

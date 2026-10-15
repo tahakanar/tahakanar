@@ -1,0 +1,261 @@
+---
+title: 'Deduplicating In-Flight Requests Without Leaking Data Between Users'
+date: '2026-09-25'
+description: 'How I shared concurrent /me requests in Redux, handled account and workspace changes, and tested late responses.'
+keywords:
+  [
+    'deduplicate API requests',
+    'in-flight request deduplication',
+    'shared promise JavaScript',
+    'Redux thunk request dedupe',
+    'race condition logout login',
+    'stale response React',
+    'JWT sub claim',
+    'React Query dedupe vs Redux',
+    'frontend auth race condition',
+    'TypeScript request cache'
+  ]
+---
+
+Several screens in the dashboard fetched `/me` twice when they opened. The layout made one request and the page made another, then both wrote the response into the same Redux slices.
+
+Sharing the pending promise would remove the duplicate request. The part I needed to be careful with was logout: that promise could still be pending when a different user signed in.
+
+## Sharing the pending promise
+
+Keep the pending promise in a module-level variable. If a request is already in flight, return the same promise instead of starting a new one.
+
+```ts
+let inflight: Promise<User | null> | null = null;
+
+export const loadMe = () => (dispatch: AppDispatch) => {
+  if (inflight) return inflight;
+
+  inflight = api
+    .getMe()
+    .then(user => {
+      dispatch(setMe(user));
+      return user;
+    })
+    .finally(() => {
+      inflight = null;
+    });
+
+  return inflight;
+};
+```
+
+Now the layout and the page can both call `dispatch(loadMe())` and only one request goes out. Both callers get the same result, and Redux is written once.
+
+This works while the same user stays signed in. An account switch exposes the missing check.
+
+## The bug: a response from the previous session
+
+1. User A opens the app. `loadMe()` starts a request with A's token.
+2. Before it resolves, A logs out, and B logs in on the same browser. Shared machines, account switching, an impatient tester — it happens.
+3. B's layout calls `loadMe()`. There's already a promise in flight, so B **shares A's request**.
+4. A's response arrives and gets written into Redux. B is now looking at A's name, company and permissions.
+
+Even without step 3, the late response from step 1 can still land after B's data and overwrite it. **Sharing** the wrong request and **writing** a stale response are two separate problems, and you need to guard against both.
+
+You could try to fix this by resetting `inflight` everywhere a token changes: login, logout, refresh, invite links, SSO callbacks, account switching. In a mature app, that list is long and somebody will add a new entry without knowing about `inflight`. I wanted the loader to protect itself instead.
+
+## Fix 1: bind the request to a session key
+
+Record **who** the request was made for, and check it both before sharing and before writing.
+
+I could use the access token as the key, but it changes on refresh. That would discard a pending response even when the user had not changed.
+
+The JWT `sub` claim is better: it identifies the user and stays the same across refreshes.
+
+```ts
+import { decodeJwtPayload } from '@/utils/jwt';
+
+const getSessionKey = (): string | null => {
+  const token = localStorage.getItem('accessToken');
+  if (!token) return null;
+  const sub = decodeJwtPayload(token)?.sub;
+  // If we can't read `sub`, fall back to the token itself: worst case a refresh
+  // makes us skip one write, which is safe.
+  return typeof sub === 'string' ? sub : token;
+};
+```
+
+A note on `decodeJwtPayload`: it only base64-decodes the payload and **does not verify the signature**. That's fine here, because we're not making a security decision. We're only deciding whether a response belongs to the current tab state. The backend still enforces who can see what.
+
+```ts
+export function decodeJwtPayload(
+  token: string | null | undefined
+): Record<string, unknown> | null {
+  const payload = token?.split('.')[1];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(
+      base64.length + ((4 - (base64.length % 4)) % 4),
+      '='
+    );
+    const claims: unknown = JSON.parse(atob(padded));
+    return claims && typeof claims === 'object'
+      ? (claims as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+```
+
+JWTs use **base64url**, not base64: `-` and `_` instead of `+` and `/`, and no padding. `atob` expects standard base64, so you have to convert and re-pad, or it'll throw on some tokens and work on others.
+
+## Fix 2: a generation counter for "same user, different context"
+
+The session key covers user switches. But there's another case: the **same** user changes server-side context, for example switching workspace or organization. The token's `sub` is the same, but a `/me` response from before the switch describes the wrong workspace.
+
+For that, I used a generation counter. Anything that invalidates the current `/me` bumps it, and responses from an older generation are ignored.
+
+```ts
+let generation = 0;
+
+export const invalidateMe = () => {
+  generation += 1;
+  inflight = null;
+};
+```
+
+## The full loader
+
+```ts
+type Inflight = {
+  promise: Promise<User | null>;
+  sessionKey: string | null;
+};
+
+let inflight: Inflight | null = null;
+let generation = 0;
+
+export const invalidateMe = () => {
+  generation += 1;
+  inflight = null;
+};
+
+export const loadMe =
+  ({ force = false }: { force?: boolean } = {}) =>
+  (dispatch: AppDispatch): Promise<User | null> => {
+    const sessionKey = getSessionKey();
+
+    // Don't share a request that belongs to someone else (or that we're told is stale).
+    if (force || (inflight && inflight.sessionKey !== sessionKey)) {
+      invalidateMe();
+    }
+    if (inflight) return inflight.promise;
+
+    const requestGeneration = generation;
+
+    const promise = api
+      .getMe()
+      .then(response => {
+        if (!response.success) return null;
+
+        // Only write if nothing changed while we were waiting.
+        if (
+          requestGeneration !== generation ||
+          sessionKey !== getSessionKey()
+        ) {
+          return null;
+        }
+        dispatch(setMe(response.data));
+        return response.data;
+      })
+      .finally(() => {
+        // Only clear the slot if it's still ours — a newer request may own it now.
+        if (inflight?.promise === promise) inflight = null;
+      });
+
+    inflight = { promise, sessionKey };
+    return promise;
+  };
+```
+
+Three things in there are easy to get wrong:
+
+**The validity check runs at response time, not request time.** The session key is captured when the request starts and compared with `getSessionKey()` when it finishes. That's what catches "A logged out, B logged in, A's response arrived late". An invalidated response returns `null` as well as skipping the Redux write, so callers awaiting the thunk cannot accidentally use stale user data.
+
+**`finally` checks ownership.** Without `inflight?.promise === promise`, an old request finishing late would clear the slot that a **newer** request owns, and the next caller would start a duplicate.
+
+**`force` exists for the workspace switch.** After switching, the switcher calls `loadMe({ force: true })`. Any pending request from before the switch is neither shared nor written.
+
+## Then remove the duplicate callers
+
+Deduplication made the double request harmless, but I still removed the page-level calls that only existed because "the page needs the user". Those pages always render inside the layout, and the layout already loads the user. `loadMe` is now the **only** way the app fetches `/me`, so there's a single place to reason about.
+
+## What about React Query?
+
+If you use TanStack Query (I wrote about it [here](/blog/react-query-typescript)), you get in-flight deduplication for free: two `useQuery` calls with the same key share one request.
+
+You do **not** get the session safety for free. If your key is `['me']`, a request started for user A and resolved after B logs in will still land in the `['me']` cache entry. The same two ideas apply:
+
+- put the session in the key: `['me', userId]`, or clear the cache on logout with `queryClient.clear()`
+- cancel in-flight queries on logout with `queryClient.cancelQueries()`
+
+The query key and logout cleanup need to agree on which session owns the data.
+
+## Testing it
+
+These are the tests I care about most, written against the thunk with a mocked API:
+
+```ts
+it('shares one request between concurrent callers', async () => {
+  const getMe = mockGetMe();
+  await Promise.all([loadMe()(dispatch), loadMe()(dispatch)]);
+
+  expect(getMe).toHaveBeenCalledTimes(1);
+  expect(dispatch).toHaveBeenCalledTimes(1);
+});
+
+it("never writes the previous user's response after a session switch", async () => {
+  setToken({ sub: 'user-a' });
+  const first = deferred<User>();
+  mockGetMe(first.promise);
+  const pendingA = loadMe()(dispatch);
+
+  setToken({ sub: 'user-b' }); // logout + login as someone else
+  mockGetMe(Promise.resolve(userB));
+  await loadMe()(dispatch); // must NOT share A's request
+
+  first.resolve(userA);
+  expect(await pendingA).toBeNull();
+
+  expect(dispatch).toHaveBeenCalledWith(setMe(userB));
+  expect(dispatch).not.toHaveBeenCalledWith(setMe(userA));
+});
+
+it('keeps sharing across a token refresh for the same user', async () => {
+  setToken({ sub: 'user-a', iat: 1 });
+  const getMe = mockGetMe();
+  const p1 = loadMe()(dispatch);
+
+  setToken({ sub: 'user-a', iat: 2 }); // refreshed token, same user
+  const p2 = loadMe()(dispatch);
+
+  await Promise.all([p1, p2]);
+  expect(getMe).toHaveBeenCalledTimes(1);
+});
+```
+
+The account-switch test covers the failure that request-count assertions miss. It checks both the Redux write and the value returned to the original caller.
+
+The `deferred` helper is just a promise you resolve by hand:
+
+```ts
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(r => (resolve = r));
+  return { promise, resolve };
+}
+```
+
+With `deferred`, the test can sign in as B before resolving A's request. There is no delay to tune for CI.
+
+The loader is longer now, mostly because of the response-time checks. Those are worth keeping next to the request itself. A clean Network tab only tells me deduplication is working; the account-switch test tells me what happens to the request that was already running.
+
+Workspace changes still need to call `loadMe({ force: true })`. Reading the user ID cannot tell the loader that the same user has moved to a different workspace.
